@@ -1,0 +1,8 @@
+node_modules/
+data/
+.env
+outputs/
+work/
+coverage/
+npm-debug.log*
+pnpm-debug.log*

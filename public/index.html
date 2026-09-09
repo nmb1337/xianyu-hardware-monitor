@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#111827">
+    <title>闲鱼硬件监控</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">LOCAL MONITOR</p>
+        <h1>闲鱼硬件监控</h1>
+      </div>
+      <div class="topbar-actions">
+        <span id="monitor-state" class="status-dot">未启动</span>
+        <button id="start-monitor" class="button primary">启动监控</button>
+        <button id="stop-monitor" class="button danger">停止</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="summary-grid" aria-label="状态概览">
+        <article>
+          <span>浏览器</span>
+          <strong id="browser-state">检查中</strong>
+          <small id="browser-message">-</small>
+        </article>
+        <article>
+          <span>QQ 提醒</span>
+          <strong id="astrbot-state">检查中</strong>
+          <small id="astrbot-message">-</small>
+        </article>
+        <article>
+          <span>当前任务</span>
+          <strong id="activity-state">等待中</strong>
+          <small id="activity-message">-</small>
+        </article>
+      </section>
+
+      <section class="section-browser">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">XIANYU SESSION</p>
+            <h2>闲鱼浏览器</h2>
+          </div>
+          <div class="inline-actions">
+            <button id="open-login" class="button">打开登录</button>
+            <button id="verify-login" class="button">验证登录</button>
+            <button id="close-browser" class="icon-button" title="关闭浏览器" aria-label="关闭浏览器">X</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="rules-section">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">WATCH RULES</p>
+            <h2>监控规则</h2>
+          </div>
+          <span id="rule-count" class="muted">0 条规则</span>
+        </div>
+
+        <form id="rule-form" class="rule-form">
+          <label>
+            <span>规则名称</span>
+            <input name="name" maxlength="80" placeholder="例如：RTX 4070 Super" required>
+          </label>
+          <label>
+            <span>品类</span>
+            <select name="category" id="category" required></select>
+          </label>
+          <label>
+            <span>闲鱼搜索词</span>
+            <input name="keyword" maxlength="120" placeholder="例如：4070 super 显卡" required>
+          </label>
+          <label>
+            <span>最低价（元）</span>
+            <input name="minPriceCny" min="0" max="999999.99" step="0.01" type="number" value="0" required>
+          </label>
+          <label>
+            <span>最高价（元）</span>
+            <input name="maxPriceCny" min="0.01" max="1000000" step="0.01" type="number" placeholder="3500" required>
+          </label>
+          <label>
+            <span>扫描间隔（秒）</span>
+            <input name="scanIntervalSeconds" min="90" max="86400" step="1" type="number" value="120" required>
+          </label>
+          <label>
+            <span>必须包含</span>
+            <input name="includeTerms" placeholder="逗号分隔，例如：国行,在保">
+          </label>
+          <label>
+            <span>排除词</span>
+            <input name="excludeTerms" placeholder="逗号分隔，例如：坏,尸体,维修">
+          </label>
+          <div class="rule-toggles">
+            <label class="check-label">
+              <input name="personalOnly" type="checkbox" checked>
+              <span>仅个人卖家</span>
+            </label>
+            <label class="check-label">
+              <input name="enabled" type="checkbox" checked>
+              <span>创建后启用</span>
+            </label>
+          </div>
+          <button id="save-rule" class="button primary add-rule" type="submit">添加规则</button>
+        </form>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>规则</th>
+                <th>搜索词</th>
+                <th>提醒价</th>
+                <th>筛选</th>
+                <th>状态</th>
+                <th>上次结果</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="rules-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="settings-grid">
+        <div>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">ASTRBOT + NAPCAT</p>
+              <h2>QQ 提醒</h2>
+            </div>
+          </div>
+          <form id="settings-form" class="settings-form">
+            <label>
+              <span>AstrBot 地址</span>
+              <input id="astrbot-base-url" name="astrbotBaseUrl" type="url" inputmode="url" value="http://127.0.0.1:6185" required>
+            </label>
+            <label>
+              <span>AstrBot IM API Key</span>
+              <input id="astrbot-api-key" name="astrbotApiKey" type="password" autocomplete="off" placeholder="留空则保留已保存的 Key">
+            </label>
+            <label>
+              <span>OneBot 机器人 ID</span>
+              <input id="astrbot-bot-id" name="astrbotBotId" maxlength="100" placeholder="AstrBot 创建 OneBot v11 时填写的 ID" required>
+            </label>
+            <label>
+              <span>接收 QQ 号</span>
+              <input id="astrbot-qq" name="astrbotReceiverQq" inputmode="numeric" placeholder="接收提醒的 QQ 号" required>
+            </label>
+            <div class="inline-actions">
+              <button class="button primary" type="submit">保存设置</button>
+              <button id="test-astrbot" class="button" type="button">发送测试</button>
+              <button id="retry-failed" class="button" type="button">重试失败消息</button>
+            </div>
+          </form>
+        </div>
+        <div>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">ALERT QUEUE</p>
+              <h2>提醒记录</h2>
+            </div>
+          </div>
+          <div id="notifications" class="compact-list"></div>
+        </div>
+      </section>
+
+      <section class="listings-section">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">LOW PRICE RESULTS</p>
+            <h2>低价商品</h2>
+          </div>
+          <span class="muted">QQ 提醒和这里都会显示商品原链接。</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>商品</th>
+                <th>品类 / 规则</th>
+                <th>价格</th>
+                <th>提醒价</th>
+                <th>发现时间</th>
+                <th>链接</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="listings-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="blocked-section">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">BLOCKED ITEMS</p>
+            <h2>已屏蔽商品</h2>
+          </div>
+          <span class="muted">恢复后重新显示；屏蔽时取消的待发提醒会恢复发送。</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>商品</th>
+                <th>屏蔽时间</th>
+                <th>链接</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="blocked-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
