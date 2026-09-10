@@ -8,6 +8,7 @@ import { MonitorDatabase } from "./db.js";
 import { AstrBotNotifier, normalizeAstrBotBaseUrl } from "./astrbot.js";
 import { XianyuBrowser } from "./browser.js";
 import { MonitorService } from "./monitor.js";
+import { MINIMUM_RULE_INTERVAL_SECONDS } from "./pacing.js";
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const rootDirectory = resolve(sourceDirectory, "..");
@@ -100,8 +101,8 @@ function cleanRule(input, current = {}) {
   if (minimum !== null && (!Number.isFinite(minimum) || minimum < 0 || minimum >= maximum)) {
     throw new Error("最低价必须大于等于 0 且小于最高价");
   }
-  if (!Number.isInteger(interval) || interval < 90 || interval > 86_400) {
-    throw new Error("扫描间隔必须为 90 到 86400 秒之间的整数");
+  if (!Number.isInteger(interval) || interval < MINIMUM_RULE_INTERVAL_SECONDS || interval > 86_400) {
+    throw new Error(`扫描间隔必须为 ${MINIMUM_RULE_INTERVAL_SECONDS} 到 86400 秒之间的整数`);
   }
 
   return {
@@ -187,6 +188,9 @@ async function routeApi(request, response, url, services) {
   }
   if (method === "POST" && path === "/api/monitor/stop") {
     return sendJson(response, 200, await monitor.stop());
+  }
+  if (method === "POST" && path === "/api/monitor/resume") {
+    return sendJson(response, 200, await monitor.resumeAfterHumanCheck());
   }
   if (method === "GET" && path === "/api/listings") {
     return sendJson(response, 200, database.listListings(url.searchParams.get("limit")));

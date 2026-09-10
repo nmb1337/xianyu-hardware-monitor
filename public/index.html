@@ -48,9 +48,11 @@
           <div class="inline-actions">
             <button id="open-login" class="button">打开登录</button>
             <button id="verify-login" class="button">验证登录</button>
+            <button id="resume-monitor" class="button primary" disabled>恢复扫描</button>
             <button id="close-browser" class="icon-button" title="关闭浏览器" aria-label="关闭浏览器">X</button>
           </div>
         </div>
+        <p class="muted">遇到验证码或登录失效时会暂停搜索并 QQ 提醒；请人工处理后再点“恢复扫描”，程序不会绕过检测。</p>
       </section>
 
       <section class="rules-section">
@@ -85,7 +87,7 @@
           </label>
           <label>
             <span>扫描间隔（秒）</span>
-            <input name="scanIntervalSeconds" min="90" max="86400" step="1" type="number" value="120" required>
+            <input name="scanIntervalSeconds" min="300" max="86400" step="1" type="number" value="300" required>
           </label>
           <label>
             <span>必须包含</span>

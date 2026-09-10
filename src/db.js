@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { MINIMUM_RULE_INTERVAL_SECONDS } from "./pacing.js";
 
 function now() {
   return Date.now();
@@ -40,7 +41,7 @@ function toRule(row) {
     priceCeilingCny: row.price_ceiling_cny,
     personalOnly: toBoolean(row.personal_only),
     enabled: toBoolean(row.enabled),
-    scanIntervalSeconds: row.scan_interval_seconds,
+    scanIntervalSeconds: Math.max(row.scan_interval_seconds, MINIMUM_RULE_INTERVAL_SECONDS),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     lastScannedAt: row.last_scanned_at,
@@ -76,7 +77,7 @@ export class MonitorDatabase {
         price_ceiling_cny REAL NOT NULL,
         personal_only INTEGER NOT NULL DEFAULT 1,
         enabled INTEGER NOT NULL DEFAULT 1,
-        scan_interval_seconds INTEGER NOT NULL DEFAULT 120,
+        scan_interval_seconds INTEGER NOT NULL DEFAULT 300,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         last_scanned_at INTEGER,
@@ -153,6 +154,14 @@ export class MonitorDatabase {
         WHERE last_error LIKE '%Target page, context or browser has been closed%'
       `)
       .run(now());
+
+    this.db
+      .prepare(`
+        UPDATE rules
+        SET scan_interval_seconds = ?
+        WHERE scan_interval_seconds < ?
+      `)
+      .run(MINIMUM_RULE_INTERVAL_SECONDS, MINIMUM_RULE_INTERVAL_SECONDS);
   }
 
   close() {
@@ -306,14 +315,46 @@ export class MonitorDatabase {
       .map(toRule);
   }
 
+  postponeEnabledRules(fromTimestamp = now(), gapMs = 90_000, { reset = false } = {}) {
+    const rows = this.db
+      .prepare(`
+        SELECT id, next_scan_at AS nextScanAt FROM rules
+        WHERE enabled = 1
+        ORDER BY COALESCE(next_scan_at, 0) ASC, id ASC
+      `)
+      .all();
+    const statement = this.db.prepare(
+      "UPDATE rules SET next_scan_at = ?, updated_at = ? WHERE id = ?"
+    );
+    const timestamp = now();
+    rows.forEach((row, index) => {
+      const scheduled = fromTimestamp + (index + 1) * gapMs;
+      const nextScanAt = reset
+        ? scheduled
+        : Math.max(Number(row.nextScanAt) || 0, scheduled);
+      statement.run(nextScanAt, timestamp, row.id);
+    });
+    return rows.length;
+  }
+
   markRuleScanned(id, { nextScanAt, error = null }) {
+    if (error) {
+      this.db
+        .prepare(`
+          UPDATE rules
+          SET next_scan_at = ?, last_error = ?, updated_at = ?
+          WHERE id = ?
+        `)
+        .run(nextScanAt, error, now(), id);
+      return;
+    }
     this.db
       .prepare(`
         UPDATE rules
-        SET last_scanned_at = ?, next_scan_at = ?, last_error = ?, updated_at = ?
+        SET last_scanned_at = ?, next_scan_at = ?, last_error = NULL, updated_at = ?
         WHERE id = ?
       `)
-      .run(now(), nextScanAt, error, now(), id);
+      .run(now(), nextScanAt, now(), id);
   }
 
   recordCandidateListing(rule, listing, price, shouldAlert, message) {

@@ -105,6 +105,12 @@ h2 {
   background: #f2f7fc;
 }
 
+.button:disabled:hover,
+.icon-button:disabled:hover {
+  border-color: #b8c1cc;
+  background: #ffffff;
+}
+
 .button.primary {
   border-color: #16714c;
   background: #18774f;
@@ -115,10 +121,23 @@ h2 {
   background: #11623f;
 }
 
+.button.primary:disabled,
+.button.primary:disabled:hover {
+  border-color: #b8c1cc;
+  background: #ffffff;
+  color: #172033;
+}
+
 .button.danger {
   border-color: #b94b51;
   background: #b94b51;
   color: #ffffff;
+}
+
+.button:disabled,
+.icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .icon-button {

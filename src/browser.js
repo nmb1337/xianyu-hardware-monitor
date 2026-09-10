@@ -2,10 +2,12 @@ import { existsSync, mkdirSync } from "node:fs";
 import { URL } from "node:url";
 import { resolve } from "node:path";
 import { parsePrice } from "./filter.js";
+import { MINIMUM_SEARCH_GAP_MS } from "./pacing.js";
 
 const SEARCH_URL = "https://www.goofish.com/search?q=";
 const LOGIN_COOKIE_NAMES = new Set(["tracknick", "unb", "lgc"]);
 const SEARCH_RESPONSE_MARKER = "mtop.taobao.idlemtopsearch.pc.search";
+const VERIFICATION_MASK_SELECTOR = ".baxia-dialog-mask";
 
 function chromeExecutable() {
   const candidates = [
@@ -111,6 +113,12 @@ export function isClosedTargetError(error) {
   );
 }
 
+export function isVerificationOverlayError(error) {
+  return /baxia-dialog(?:-mask)?|intercepts pointer events/i.test(
+    String(error instanceof Error ? error.message : error)
+  );
+}
+
 export class XianyuBrowser {
   constructor({ dataDirectory }) {
     this.profileDirectory = resolve(dataDirectory, "chrome-profile");
@@ -121,6 +129,7 @@ export class XianyuBrowser {
     this.loginState = "not_started";
     this.message = "";
     this.operation = Promise.resolve();
+    this.lastSearchStartedAt = 0;
   }
 
   status() {
@@ -189,6 +198,53 @@ export class XianyuBrowser {
     }
   }
 
+  async #hasVerificationMask() {
+    return this.page
+      .locator(VERIFICATION_MASK_SELECTOR)
+      .first()
+      .isVisible({ timeout: 1_000 })
+      .catch(() => false);
+  }
+
+  async #requireManualVerification() {
+    this.loginState = "waiting_for_verification";
+    this.message = "闲鱼弹出了访问验证，请在浏览器窗口中人工完成后再扫描。";
+    await this.page.bringToFront();
+    throw new Error(this.message);
+  }
+
+  async #checkForManualVerification(pageText = "") {
+    if (
+      looksLikeLoginOrVerification(this.page.url, pageText.slice(0, 20_000))
+      || await this.#hasVerificationMask()
+    ) {
+      await this.#requireManualVerification();
+    }
+  }
+
+  async #waitForSearchSlot() {
+    const waitMilliseconds = this.lastSearchStartedAt + MINIMUM_SEARCH_GAP_MS - Date.now();
+    if (waitMilliseconds > 0) {
+      this.message = `访问频率保护：将在 ${Math.ceil(waitMilliseconds / 1_000)} 秒后执行下一次搜索。`;
+      await this.page.waitForTimeout(waitMilliseconds);
+    }
+    this.lastSearchStartedAt = Date.now();
+  }
+
+  async #clickSortOption(text) {
+    try {
+      await this.page
+        .getByText(text, { exact: true })
+        .first()
+        .click({ timeout: 8_000 });
+    } catch (error) {
+      if (isVerificationOverlayError(error) || await this.#hasVerificationMask()) {
+        await this.#requireManualVerification();
+      }
+      throw error;
+    }
+  }
+
   async #withOperation(callback) {
     const previous = this.operation;
     let release;
@@ -235,12 +291,22 @@ export class XianyuBrowser {
       );
       const pageText = await this.page.locator("body").innerText({ timeout: 5_000 }).catch(() => "");
 
-      if (hasCookie && !looksLikeLoginOrVerification(this.page.url, pageText.slice(0, 8_000))) {
+      const hasVerificationMask = await this.#hasVerificationMask();
+      if (
+        hasCookie
+        && !hasVerificationMask
+        && !looksLikeLoginOrVerification(this.page.url, pageText.slice(0, 8_000))
+      ) {
         this.loginState = "verified";
         this.message = "闲鱼登录状态已验证。";
       } else {
-        this.loginState = "waiting_for_login";
-        this.message = "未检测到有效登录状态，请在浏览器中完成登录或验证。";
+        this.loginState = hasVerificationMask ? "waiting_for_verification" : "waiting_for_login";
+        this.message = hasVerificationMask
+          ? "闲鱼仍在要求访问验证，请在浏览器窗口中人工完成。"
+          : "未检测到有效登录状态，请在浏览器中完成登录或验证。";
+        if (hasVerificationMask) {
+          await this.page.bringToFront();
+        }
       }
       return this.status();
     });
@@ -271,29 +337,20 @@ export class XianyuBrowser {
         throw new Error(this.message);
       }
 
+      await this.#waitForSearchSlot();
       const url = `${SEARCH_URL}${encodeURIComponent(rule.keyword)}`;
       await this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
       await this.page.waitForTimeout(3_500);
 
       const pageText = await this.page.locator("body").innerText({ timeout: 5_000 }).catch(() => "");
-      if (looksLikeLoginOrVerification(this.page.url, pageText.slice(0, 20_000))) {
-        this.loginState = "waiting_for_verification";
-        this.message = "闲鱼要求登录或验证，请在浏览器窗口中人工处理。";
-        await this.page.bringToFront();
-        throw new Error(this.message);
-      }
+      await this.#checkForManualVerification(pageText);
 
-      await this.page
-        .getByText("新发布", { exact: true })
-        .first()
-        .click({ timeout: 8_000 });
+      await this.#clickSortOption("新发布");
       await this.page.waitForTimeout(600);
+      await this.#checkForManualVerification();
 
       const latestResponse = this.page.waitForResponse(isSearchResponse, { timeout: 30_000 });
-      await this.page
-        .getByText("最新", { exact: true })
-        .first()
-        .click({ timeout: 8_000 });
+      await this.#clickSortOption("最新");
       const payload = await (await latestResponse).json();
       const listings = parseSearchResponse(payload);
       if (!listings.length) {

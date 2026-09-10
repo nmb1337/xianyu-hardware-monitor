@@ -108,3 +108,32 @@ test("blocked listing is hidden, cancels pending notifications, and can be resto
   assert.equal(database.listNotifications()[0].status, "pending");
   database.close();
 });
+
+test("postponeEnabledRules staggers due rules without pulling later rules forward", () => {
+  const database = makeDatabase();
+  const first = makeRule(database);
+  const second = database.createRule({
+    name: "CPU 监控",
+    category: "cpu",
+    keyword: "7800X3D",
+    includeTerms: ["7800X3D"],
+    excludeTerms: [],
+    priceCeilingCny: 2200,
+    personalOnly: true,
+    enabled: true,
+    scanIntervalSeconds: 300
+  });
+  const later = Date.now() + 10 * 60_000;
+  database.markRuleScanned(second.id, { nextScanAt: later });
+
+  const from = Date.now();
+  database.postponeEnabledRules(from, 90_000);
+
+  const firstNext = database.getRule(first.id).nextScanAt;
+  const secondNext = database.getRule(second.id).nextScanAt;
+  assert.ok(firstNext >= from + 90_000);
+  assert.ok(secondNext >= later);
+  assert.ok(secondNext >= from + 180_000);
+  database.close();
+});
+

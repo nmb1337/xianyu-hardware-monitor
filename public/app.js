@@ -94,8 +94,19 @@ function renderStatus(status) {
   $("#astrbot-message").textContent = status.astrbotConfigured
     ? "AstrBot + NapCat QQ 私聊已启用"
     : "填写 AstrBot 地址、IM API Key、机器人 ID 和接收 QQ";
-  $("#activity-state").textContent = status.activeRuleId ? "扫描中" : status.running ? "待扫描" : "已停止";
+  $("#activity-state").textContent = status.accessPaused
+    ? "已暂停"
+    : status.activeRuleId
+      ? "扫描中"
+      : status.running
+        ? "待扫描"
+        : "已停止";
   $("#activity-message").textContent = status.lastActivity || "-";
+  const resumeButton = $("#resume-monitor");
+  resumeButton.disabled = !status.accessPaused;
+  resumeButton.title = status.accessPaused
+    ? "人工完成登录或验证后再点这里，不会立刻连续扫描"
+    : "当前没有因登录或验证暂停";
 }
 
 function renderRules(rules) {
@@ -119,7 +130,7 @@ function renderRules(rules) {
       return `
         <tr>
           <td><strong>${escapeHtml(rule.name)}</strong><small>${escapeHtml(categoryLabel(rule.category))}</small></td>
-          <td>${escapeHtml(rule.keyword)}<small>${rule.scanIntervalSeconds} 秒 + 随机等待</small></td>
+          <td>${escapeHtml(rule.keyword)}<small>${rule.scanIntervalSeconds} 秒，低频访问保护已启用</small></td>
           <td>${formatPriceRange(rule.minPriceCny, rule.maxPriceCny)}</td>
           <td>${escapeHtml(filters || "-")}</td>
           <td><span class="tag ${rule.enabled ? "on" : "off"}">${rule.enabled ? "已启用" : "已停用"}</span></td>
@@ -290,7 +301,7 @@ async function bootstrap() {
       }
       formElement.reset();
       formElement.querySelector('[name="minPriceCny"]').value = "0";
-      formElement.querySelector('[name="scanIntervalSeconds"]').value = "120";
+      formElement.querySelector('[name="scanIntervalSeconds"]').value = "300";
       formElement.querySelector('[name="personalOnly"]').checked = true;
       formElement.querySelector('[name="enabled"]').checked = true;
       state.editingRuleId = null;
@@ -312,11 +323,15 @@ async function bootstrap() {
     await withAction(button, async () => {
       if (button.dataset.action === "scan") {
         const result = await request(`/api/rules/${id}/scan`, { method: "POST" });
-        toast(
-          result.baseline
-            ? "首次扫描已建立基线，现有商品不会误发提醒。"
-            : `扫描完成：低价匹配 ${result.matched} 个，已见未提醒 ${result.alreadySeen} 个，新增提醒 ${result.queued} 个${result.blocked ? `，已屏蔽 ${result.blocked} 个` : ""}。`
-        );
+        if (result.scanned === false) {
+          toast(result.reason, true);
+        } else {
+          toast(
+            result.baseline
+              ? "首次扫描已建立基线，现有商品不会误发提醒。"
+              : `扫描完成：低价匹配 ${result.matched} 个，已见未提醒 ${result.alreadySeen} 个，新增提醒 ${result.queued} 个${result.blocked ? `，已屏蔽 ${result.blocked} 个` : ""}。`
+          );
+        }
       }
       if (button.dataset.action === "edit") {
         const formElement = $("#rule-form");
@@ -432,6 +447,12 @@ async function bootstrap() {
     withAction(event.currentTarget, async () => {
       const browser = await request("/api/browser/verify", { method: "POST" });
       toast(browser.state === "verified" ? "闲鱼登录已验证。" : browser.message, browser.state !== "verified");
+    })
+  );
+  $("#resume-monitor").addEventListener("click", (event) =>
+    withAction(event.currentTarget, async () => {
+      await request("/api/monitor/resume", { method: "POST" });
+      toast("已确认登录，自动搜索将按间隔恢复。");
     })
   );
   $("#close-browser").addEventListener("click", (event) =>
