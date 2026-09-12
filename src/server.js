@@ -6,6 +6,7 @@ import { CATEGORIES } from "./categories.js";
 import { splitTerms } from "./filter.js";
 import { MonitorDatabase } from "./db.js";
 import { AstrBotNotifier, normalizeAstrBotBaseUrl } from "./astrbot.js";
+import { AiReviewer, normalizeAiBaseUrl } from "./ai.js";
 import { XianyuBrowser } from "./browser.js";
 import { MonitorService } from "./monitor.js";
 import { MINIMUM_RULE_INTERVAL_SECONDS } from "./pacing.js";
@@ -231,24 +232,68 @@ async function routeApi(request, response, url, services) {
   }
   if (method === "PUT" && path === "/api/settings") {
     const body = await readJson(request);
-    const receiver = String(body.astrbotReceiverQq ?? "").trim();
-    const botId = String(body.astrbotBotId ?? "").trim();
+    const currentSettings = database.getPublicSettings();
+    const receiver = body.astrbotReceiverQq === undefined
+      ? currentSettings.astrbotReceiverQq
+      : String(body.astrbotReceiverQq).trim();
+    const botId = body.astrbotBotId === undefined
+      ? currentSettings.astrbotBotId
+      : String(body.astrbotBotId).trim();
     if (receiver && !/^\d{5,15}$/.test(receiver)) {
       throw new Error("接收 QQ 号格式无效");
     }
     if (botId && (botId.length > 100 || /[\s:]/.test(botId))) {
       throw new Error("AstrBot 机器人 ID 不能包含空格或冒号");
     }
+    const aiBaseUrl = String(body.aiBaseUrl ?? "").trim();
+    const aiModel = String(body.aiModel ?? "").trim();
+    if (aiBaseUrl) {
+      normalizeAiBaseUrl(aiBaseUrl);
+    }
+    if (aiModel.length > 120) {
+      throw new Error("AI 模型名称不能超过 120 个字符");
+    }
     return sendJson(response, 200, database.updateSettings({
-      astrbotBaseUrl: normalizeAstrBotBaseUrl(body.astrbotBaseUrl ?? "http://127.0.0.1:6185"),
+      astrbotBaseUrl: normalizeAstrBotBaseUrl(body.astrbotBaseUrl ?? currentSettings.astrbotBaseUrl),
       astrbotApiKey: body.astrbotApiKey,
       astrbotBotId: botId,
-      astrbotReceiverQq: receiver
+      astrbotReceiverQq: receiver,
+      aiEnabled: typeof body.aiEnabled === "boolean" ? body.aiEnabled : undefined,
+      aiBaseUrl: aiBaseUrl || undefined,
+      aiApiKey: body.aiApiKey,
+      aiModel: aiModel || undefined
     }));
   }
   if (method === "POST" && path === "/api/settings/test-astrbot") {
     await notifier.sendMessage("闲鱼硬件监控：AstrBot + NapCat QQ 提醒测试成功。");
     return sendJson(response, 200, { ok: true });
+  }
+  if (method === "POST" && path === "/api/settings/test-ai") {
+    if (!services.ai.configured()) {
+      throw new Error("请先启用 AI 并保存接口地址和模型名称");
+    }
+    const result = await services.ai.reviewCandidates(
+      {
+        name: "连接测试",
+        category: "custom",
+        keyword: "硬件",
+        includeTerms: [],
+        excludeTerms: [],
+        minPriceCny: null,
+        maxPriceCny: 1_000_000
+      },
+      [{
+        itemId: "ai-connection-test",
+        title: "测试用二手显卡",
+        price: 999,
+        sellerName: "测试",
+        url: "https://www.goofish.com/item?id=ai-connection-test"
+      }]
+    );
+    if (result.error) {
+      throw new Error(result.error);
+    }
+    return sendJson(response, 200, { ok: true, reviewed: result.decisions.size });
   }
   if (method === "GET" && path === "/api/browser") {
     return sendJson(response, 200, browser.status());
@@ -272,8 +317,9 @@ export function createApplication({ databasePath = resolve(dataDirectory, "monit
   database.initializeFromEnvironment(process.env);
   const browser = new XianyuBrowser({ dataDirectory: dirname(databasePath) });
   const notifier = new AstrBotNotifier(database);
-  const monitor = new MonitorService({ database, browser, notifier });
-  const services = { database, browser, notifier, monitor };
+  const ai = new AiReviewer(database);
+  const monitor = new MonitorService({ database, browser, notifier, ai });
+  const services = { database, browser, notifier, ai, monitor };
 
   const server = createServer(async (request, response) => {
     try {

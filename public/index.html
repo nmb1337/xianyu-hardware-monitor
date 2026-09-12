@@ -36,6 +36,7 @@
           <span>当前任务</span>
           <strong id="activity-state">等待中</strong>
           <small id="activity-message">-</small>
+          <small id="search-schedule">-</small>
         </article>
       </section>
 
@@ -52,7 +53,7 @@
             <button id="close-browser" class="icon-button" title="关闭浏览器" aria-label="关闭浏览器">X</button>
           </div>
         </div>
-        <p class="muted">遇到验证码或登录失效时会暂停搜索并 QQ 提醒；请人工处理后再点“恢复扫描”，程序不会绕过检测。</p>
+        <p class="muted">全局间隔：90-120 分钟随机，每次 1 条规则</p>
       </section>
 
       <section class="rules-section">
@@ -86,7 +87,7 @@
             <input name="maxPriceCny" min="0.01" max="1000000" step="0.01" type="number" placeholder="3500" required>
           </label>
           <label>
-            <span>扫描间隔（秒）</span>
+            <span>规则最短间隔（秒）</span>
             <input name="scanIntervalSeconds" min="300" max="86400" step="1" type="number" value="300" required>
           </label>
           <label>
@@ -109,6 +110,7 @@
           </div>
           <button id="save-rule" class="button primary add-rule" type="submit">添加规则</button>
         </form>
+        <p id="rotation-estimate" class="muted">-</p>
 
         <div class="table-wrap">
           <table>
@@ -159,6 +161,35 @@
               <button id="retry-failed" class="button" type="button">重试失败消息</button>
             </div>
           </form>
+          <div class="section-heading ai-heading">
+            <div>
+              <p class="eyebrow">OPTIONAL AI REVIEW</p>
+              <h2>AI 智能筛选</h2>
+            </div>
+          </div>
+          <form id="ai-settings-form" class="settings-form">
+            <label class="check-label">
+              <input id="ai-enabled" name="aiEnabled" type="checkbox">
+              <span>启用 AI 低价商品审核</span>
+            </label>
+            <label>
+              <span>OpenAI 兼容接口地址</span>
+              <input id="ai-base-url" name="aiBaseUrl" type="url" inputmode="url" value="http://127.0.0.1:11434/v1" required>
+            </label>
+            <label>
+              <span>AI API Key</span>
+              <input id="ai-api-key" name="aiApiKey" type="password" autocomplete="off" placeholder="本地模型可留空">
+            </label>
+            <label>
+              <span>模型名称</span>
+              <input id="ai-model" name="aiModel" maxlength="120" value="qwen2.5:7b" required>
+            </label>
+            <div class="inline-actions">
+              <button class="button primary" type="submit">保存 AI 设置</button>
+              <button id="test-ai" class="button" type="button">测试 AI</button>
+            </div>
+          </form>
+          <p class="muted ai-note">商品审核可屏蔽标题明确写有故障、维修、矿卡或魔改的新品；AI 不参与闲鱼访问、登录或验证码处理。</p>
         </div>
         <div>
           <div class="section-heading">
@@ -210,6 +241,7 @@
             <thead>
               <tr>
                 <th>商品</th>
+                <th>屏蔽原因</th>
                 <th>屏蔽时间</th>
                 <th>链接</th>
                 <th>操作</th>

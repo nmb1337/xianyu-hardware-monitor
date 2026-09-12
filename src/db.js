@@ -119,7 +119,14 @@ export class MonitorDatabase {
         title TEXT NOT NULL,
         url TEXT NOT NULL,
         seller_name TEXT,
+        block_reason TEXT NOT NULL DEFAULT '',
         blocked_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS search_attempts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        rule_id INTEGER,
+        started_at INTEGER NOT NULL
       );
 
       CREATE INDEX IF NOT EXISTS idx_rules_due
@@ -130,11 +137,17 @@ export class MonitorDatabase {
         ON notifications(status, available_at);
       CREATE INDEX IF NOT EXISTS idx_blocked_listings_time
         ON blocked_listings(blocked_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_search_attempts_time ON search_attempts(started_at);
     `);
 
     const columns = this.db.prepare("PRAGMA table_info(rules)").all();
     if (!columns.some((column) => column.name === "min_price_cny")) {
       this.db.exec("ALTER TABLE rules ADD COLUMN min_price_cny REAL");
+    }
+
+    const blockedColumns = this.db.prepare("PRAGMA table_info(blocked_listings)").all();
+    if (!blockedColumns.some((column) => column.name === "block_reason")) {
+      this.db.exec("ALTER TABLE blocked_listings ADD COLUMN block_reason TEXT NOT NULL DEFAULT ''");
     }
 
     if (this.getSetting("search_price_parser_version") !== "2") {
@@ -173,7 +186,11 @@ export class MonitorDatabase {
       ["astrbot_base_url", environment.ASTRBOT_BASE_URL],
       ["astrbot_api_key", environment.ASTRBOT_API_KEY],
       ["astrbot_bot_id", environment.ASTRBOT_BOT_ID],
-      ["astrbot_receiver_qq", environment.ASTRBOT_RECEIVER_QQ]
+      ["astrbot_receiver_qq", environment.ASTRBOT_RECEIVER_QQ],
+      ["ai_base_url", environment.AI_BASE_URL],
+      ["ai_api_key", environment.AI_API_KEY],
+      ["ai_model", environment.AI_MODEL],
+      ["ai_enabled", ["1", "true", "yes", "on"].includes(String(environment.AI_ENABLED ?? "").toLowerCase()) ? "1" : undefined]
     ];
     for (const [key, value] of initialValues) {
       if (!this.getSetting(key) && value) {
@@ -200,11 +217,24 @@ export class MonitorDatabase {
       astrbotBaseUrl: this.getSetting("astrbot_base_url") ?? "http://127.0.0.1:6185",
       astrbotApiKeyConfigured: Boolean(this.getSetting("astrbot_api_key")),
       astrbotBotId: this.getSetting("astrbot_bot_id") ?? "",
-      astrbotReceiverQq: this.getSetting("astrbot_receiver_qq") ?? ""
+      astrbotReceiverQq: this.getSetting("astrbot_receiver_qq") ?? "",
+      aiEnabled: this.getSetting("ai_enabled") === "1",
+      aiBaseUrl: this.getSetting("ai_base_url") ?? "http://127.0.0.1:11434/v1",
+      aiApiKeyConfigured: Boolean(this.getSetting("ai_api_key")),
+      aiModel: this.getSetting("ai_model") ?? "qwen2.5:7b"
     };
   }
 
-  updateSettings({ astrbotBaseUrl, astrbotApiKey, astrbotBotId, astrbotReceiverQq }) {
+  updateSettings({
+    astrbotBaseUrl,
+    astrbotApiKey,
+    astrbotBotId,
+    astrbotReceiverQq,
+    aiEnabled,
+    aiBaseUrl,
+    aiApiKey,
+    aiModel
+  }) {
     if (typeof astrbotBaseUrl === "string" && astrbotBaseUrl.trim()) {
       this.setSetting("astrbot_base_url", astrbotBaseUrl.trim());
     }
@@ -216,6 +246,18 @@ export class MonitorDatabase {
     }
     if (typeof astrbotReceiverQq === "string") {
       this.setSetting("astrbot_receiver_qq", astrbotReceiverQq.trim());
+    }
+    if (typeof aiEnabled === "boolean") {
+      this.setSetting("ai_enabled", aiEnabled ? "1" : "0");
+    }
+    if (typeof aiBaseUrl === "string" && aiBaseUrl.trim()) {
+      this.setSetting("ai_base_url", aiBaseUrl.trim());
+    }
+    if (typeof aiApiKey === "string" && aiApiKey.trim()) {
+      this.setSetting("ai_api_key", aiApiKey.trim());
+    }
+    if (typeof aiModel === "string" && aiModel.trim()) {
+      this.setSetting("ai_model", aiModel.trim());
     }
     return this.getPublicSettings();
   }
@@ -313,6 +355,24 @@ export class MonitorDatabase {
       `)
       .all(timestamp)
       .map(toRule);
+  }
+
+  recentSearchAttempts(since) {
+    return this.db.prepare("SELECT started_at FROM search_attempts WHERE started_at > ? ORDER BY started_at")
+      .all(since).map((row) => row.started_at);
+  }
+
+  reserveSearchAttempt(ruleId, timestamp, nextSearchAt) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("INSERT INTO search_attempts(rule_id, started_at) VALUES (?, ?)").run(ruleId, timestamp);
+      this.setSetting("xianyu_global_search_next_at", nextSearchAt);
+      this.db.prepare("DELETE FROM search_attempts WHERE started_at < ?").run(timestamp - 7 * 24 * 60 * 60_000);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   postponeEnabledRules(fromTimestamp = now(), gapMs = 90_000, { reset = false } = {}) {
@@ -459,7 +519,8 @@ export class MonitorDatabase {
     return this.db
       .prepare(`
         SELECT
-          item_id AS itemId, title, url, seller_name AS sellerName, blocked_at AS blockedAt
+          item_id AS itemId, title, url, seller_name AS sellerName,
+          block_reason AS blockReason, blocked_at AS blockedAt
         FROM blocked_listings
         ORDER BY blocked_at DESC
         LIMIT ?
@@ -475,6 +536,14 @@ export class MonitorDatabase {
     );
   }
 
+  hasListing(ruleId, itemId) {
+    return Boolean(
+      this.db
+        .prepare("SELECT 1 FROM listings WHERE rule_id = ? AND item_id = ?")
+        .get(Number(ruleId), String(itemId))
+    );
+  }
+
   blockListing(listing) {
     const itemId = String(listing.itemId ?? "").trim();
     const title = String(listing.title ?? "").trim();
@@ -482,19 +551,21 @@ export class MonitorDatabase {
     if (!itemId || !title || !url) {
       throw new Error("屏蔽商品信息不完整");
     }
+    const blockReason = String(listing.blockReason ?? "").trim().slice(0, 300);
 
     const timestamp = now();
     this.db
       .prepare(`
-        INSERT INTO blocked_listings (item_id, title, url, seller_name, blocked_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO blocked_listings (item_id, title, url, seller_name, block_reason, blocked_at)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(item_id) DO UPDATE SET
           title = excluded.title,
           url = excluded.url,
           seller_name = excluded.seller_name,
+          block_reason = excluded.block_reason,
           blocked_at = excluded.blocked_at
       `)
-      .run(itemId, title, url, String(listing.sellerName ?? ""), timestamp);
+      .run(itemId, title, url, String(listing.sellerName ?? ""), blockReason, timestamp);
     this.db
       .prepare(`
         UPDATE notifications
@@ -505,7 +576,8 @@ export class MonitorDatabase {
     return this.db
       .prepare(`
         SELECT
-          item_id AS itemId, title, url, seller_name AS sellerName, blocked_at AS blockedAt
+          item_id AS itemId, title, url, seller_name AS sellerName,
+          block_reason AS blockReason, blocked_at AS blockedAt
         FROM blocked_listings
         WHERE item_id = ?
       `)
@@ -617,4 +689,5 @@ export class MonitorDatabase {
       `)
       .run(now()).changes;
   }
+
 }

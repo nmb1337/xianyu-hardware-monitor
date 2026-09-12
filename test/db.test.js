@@ -31,6 +31,22 @@ function makeListing(itemId, price) {
   };
 }
 
+test("new databases do not create customer service storage or expose its settings", (t) => {
+  const database = makeDatabase();
+  t.after(() => database.close());
+
+  const tables = database.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all();
+  assert.equal(tables.some(({ name }) => name === "customer_messages"), false);
+  assert.equal("recordCustomerMessage" in database, false);
+  assert.equal("getCustomerConversation" in database, false);
+
+  database.updateSettings({ aiCustomerEnabled: true, aiCustomerPrompt: "Obsolete instruction" });
+  assert.equal(database.getSetting("ai_customer_enabled"), null);
+  assert.equal(database.getSetting("ai_customer_prompt"), null);
+  assert.equal("aiCustomerEnabled" in database.getPublicSettings(), false);
+  assert.equal("aiCustomerPrompt" in database.getPublicSettings(), false);
+});
+
 test("first scan stores baseline without creating a notification", () => {
   const database = makeDatabase();
   const rule = makeRule(database);
@@ -136,4 +152,3 @@ test("postponeEnabledRules staggers due rules without pulling later rules forwar
   assert.ok(secondNext >= from + 180_000);
   database.close();
 });
-

@@ -96,12 +96,22 @@ function renderStatus(status) {
     : "填写 AstrBot 地址、IM API Key、机器人 ID 和接收 QQ";
   $("#activity-state").textContent = status.accessPaused
     ? "已暂停"
+    : status.quietHoursActive
+      ? "夜间静默"
     : status.activeRuleId
       ? "扫描中"
       : status.running
         ? "待扫描"
         : "已停止";
   $("#activity-message").textContent = status.lastActivity || "-";
+  const nextSearch = `搜索时段：${formatTime(status.nextSearchAt)}`;
+  $("#search-schedule").textContent = status.accessPaused
+    ? "搜索计划已暂停，等待人工确认"
+    : status.quietHoursActive
+      ? "夜间静默：00:00-08:00 不搜索"
+    : !status.running
+      ? `自动搜索未启动；${nextSearch}`
+      : nextSearch;
   const resumeButton = $("#resume-monitor");
   resumeButton.disabled = !status.accessPaused;
   resumeButton.title = status.accessPaused
@@ -111,7 +121,20 @@ function renderStatus(status) {
 
 function renderRules(rules) {
   state.rules = rules;
-  $("#rule-count").textContent = `${rules.length} 条规则`;
+  const scanWaiting = Boolean(
+    state.status?.accessPaused || state.status?.activeRuleId
+    || !state.status?.nextSearchAt || state.status.nextSearchAt > Date.now()
+  );
+  const scanTitle = state.status?.accessPaused
+    ? "请先在闲鱼浏览器中人工完成验证或登录"
+    : "全局低频保护期间不能提前搜索";
+  const enabledCount = rules.filter((rule) => rule.enabled).length;
+  $("#rule-count").textContent = `${rules.length} 条规则，${enabledCount} 条启用`;
+  const minHours = (state.status?.searchIntervalMinMs ?? 5_400_000) * enabledCount / 3_600_000;
+  const maxHours = (state.status?.searchIntervalMaxMs ?? 7_200_000) * enabledCount / 3_600_000;
+  $("#rotation-estimate").textContent = enabledCount
+    ? `预计一轮 ${minHours}-${maxHours} 小时（不含暂停及更长的规则间隔）`
+    : "暂无已启用规则";
   const body = $("#rules-body");
   if (!rules.length) {
     body.innerHTML = `<tr><td class="empty" colspan="7">还没有监控规则。</td></tr>`;
@@ -130,14 +153,14 @@ function renderRules(rules) {
       return `
         <tr>
           <td><strong>${escapeHtml(rule.name)}</strong><small>${escapeHtml(categoryLabel(rule.category))}</small></td>
-          <td>${escapeHtml(rule.keyword)}<small>${rule.scanIntervalSeconds} 秒，低频访问保护已启用</small></td>
+          <td>${escapeHtml(rule.keyword)}<small>规则间隔下限 ${rule.scanIntervalSeconds} 秒</small></td>
           <td>${formatPriceRange(rule.minPriceCny, rule.maxPriceCny)}</td>
           <td>${escapeHtml(filters || "-")}</td>
           <td><span class="tag ${rule.enabled ? "on" : "off"}">${rule.enabled ? "已启用" : "已停用"}</span></td>
           <td>${rule.lastError ? `<small class="error-text">${escapeHtml(rule.lastError)}</small>` : `<small>${rule.lastScannedAt ? formatTime(rule.lastScannedAt) : "未扫描"}</small>`}</td>
           <td>
             <div class="row-actions">
-              <button class="button" data-action="scan" data-id="${rule.id}">扫描</button>
+              <button class="button" data-action="scan" data-id="${rule.id}" ${scanWaiting ? "disabled" : ""} title="${scanWaiting ? scanTitle : "使用当前全局搜索时段"}">扫描</button>
               <button class="button" data-action="edit" data-id="${rule.id}">编辑</button>
               <button class="button" data-action="toggle" data-id="${rule.id}">${rule.enabled ? "停用" : "启用"}</button>
               <button class="button" data-action="delete" data-id="${rule.id}">删除</button>
@@ -184,7 +207,7 @@ function renderListings(listings) {
 function renderBlockedListings(listings) {
   const body = $("#blocked-body");
   if (!listings.length) {
-    body.innerHTML = `<tr><td class="empty" colspan="4">暂无已屏蔽商品。</td></tr>`;
+    body.innerHTML = `<tr><td class="empty" colspan="5">暂无已屏蔽商品。</td></tr>`;
     return;
   }
 
@@ -193,6 +216,7 @@ function renderBlockedListings(listings) {
       (listing) => `
         <tr>
           <td><strong>${escapeHtml(listing.title)}</strong><small>${escapeHtml(listing.sellerName || "卖家信息未识别")}</small></td>
+          <td>${escapeHtml(listing.blockReason || "手动屏蔽")}</td>
           <td>${formatTime(listing.blockedAt)}</td>
           <td><a href="${escapeHtml(listing.url)}" target="_blank" rel="noreferrer">打开商品</a></td>
           <td>
@@ -248,6 +272,16 @@ async function refresh() {
   if (document.activeElement !== $("#astrbot-qq")) {
     $("#astrbot-qq").value = settings.astrbotReceiverQq || "";
   }
+  if (document.activeElement !== $("#ai-base-url")) {
+    $("#ai-base-url").value = settings.aiBaseUrl || "http://127.0.0.1:11434/v1";
+  }
+  if (document.activeElement !== $("#ai-model")) {
+    $("#ai-model").value = settings.aiModel || "qwen2.5:7b";
+  }
+  $("#ai-enabled").checked = settings.aiEnabled === true;
+  $("#ai-api-key").placeholder = settings.aiApiKeyConfigured
+    ? "已保存 Key；留空则保持不变"
+    : "本地模型可留空";
   $("#astrbot-api-key").placeholder = settings.astrbotApiKeyConfigured
     ? "已保存 Key；留空则保持不变"
     : "AstrBot IM API Key";
@@ -262,6 +296,9 @@ async function withAction(button, callback) {
     toast(error.message || "操作失败", true);
   } finally {
     setButtonLoading(button, false);
+    if (state.status) {
+      renderStatus(state.status);
+    }
   }
 }
 
@@ -425,6 +462,26 @@ async function bootstrap() {
     });
   });
 
+  $("#ai-settings-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = event.submitter;
+    const form = new FormData(event.currentTarget);
+    await withAction(button, async () => {
+      await request("/api/settings", {
+        method: "PUT",
+        body: JSON.stringify({
+          aiEnabled: form.get("aiEnabled") === "on",
+          aiBaseUrl: form.get("aiBaseUrl"),
+          aiApiKey: form.get("aiApiKey"),
+          aiModel: form.get("aiModel")
+        })
+      });
+      $("#ai-api-key").value = "";
+      toast("AI 设置已保存。");
+    });
+  });
+
+
   $("#start-monitor").addEventListener("click", (event) =>
     withAction(event.currentTarget, async () => {
       await request("/api/monitor/start", { method: "POST" });
@@ -451,8 +508,8 @@ async function bootstrap() {
   );
   $("#resume-monitor").addEventListener("click", (event) =>
     withAction(event.currentTarget, async () => {
-      await request("/api/monitor/resume", { method: "POST" });
-      toast("已确认登录，自动搜索将按间隔恢复。");
+      const status = await request("/api/monitor/resume", { method: "POST" });
+      toast(status.lastActivity);
     })
   );
   $("#close-browser").addEventListener("click", (event) =>
@@ -465,6 +522,12 @@ async function bootstrap() {
     withAction(event.currentTarget, async () => {
       await request("/api/settings/test-astrbot", { method: "POST" });
       toast("测试消息已发送。");
+    })
+  );
+  $("#test-ai").addEventListener("click", (event) =>
+    withAction(event.currentTarget, async () => {
+      await request("/api/settings/test-ai", { method: "POST" });
+      toast("AI 连接测试成功。");
     })
   );
   $("#retry-failed").addEventListener("click", (event) =>

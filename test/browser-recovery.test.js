@@ -18,4 +18,8 @@ test("isVerificationOverlayError recognizes the Xianyu Baxia verification mask",
     true
   );
   assert.equal(isVerificationOverlayError(new Error("locator.click: Timeout 8000ms exceeded")), false);
+  assert.equal(
+    isVerificationOverlayError(new Error('locator.click: <div class="tooltip"> intercepts pointer events')),
+    false
+  );
 });
