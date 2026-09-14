@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { CATEGORIES } from "./categories.js";
 import { splitTerms } from "./filter.js";
 import { MonitorDatabase } from "./db.js";
-import { AstrBotNotifier, normalizeAstrBotBaseUrl } from "./astrbot.js";
+import { AstrBotNotifier, normalizeAstrBotBaseUrl, parseReceiverQqList } from "./astrbot.js";
 import { AiReviewer, normalizeAiBaseUrl } from "./ai.js";
 import { XianyuBrowser } from "./browser.js";
 import { MonitorService } from "./monitor.js";
@@ -238,15 +238,13 @@ async function routeApi(request, response, url, services) {
   if (method === "PUT" && path === "/api/settings") {
     const body = await readJson(request);
     const currentSettings = database.getPublicSettings();
-    const receiver = body.astrbotReceiverQq === undefined
+    const receiverInput = body.astrbotReceiverQq === undefined
       ? currentSettings.astrbotReceiverQq
       : String(body.astrbotReceiverQq).trim();
+    const receivers = receiverInput ? parseReceiverQqList(receiverInput) : [];
     const botId = body.astrbotBotId === undefined
       ? currentSettings.astrbotBotId
       : String(body.astrbotBotId).trim();
-    if (receiver && !/^\d{5,15}$/.test(receiver)) {
-      throw new Error("接收 QQ 号格式无效");
-    }
     if (botId && (botId.length > 100 || /[\s:]/.test(botId))) {
       throw new Error("AstrBot 机器人 ID 不能包含空格或冒号");
     }
@@ -262,7 +260,7 @@ async function routeApi(request, response, url, services) {
       astrbotBaseUrl: normalizeAstrBotBaseUrl(body.astrbotBaseUrl ?? currentSettings.astrbotBaseUrl),
       astrbotApiKey: body.astrbotApiKey,
       astrbotBotId: botId,
-      astrbotReceiverQq: receiver,
+      astrbotReceiverQq: receivers.join(", "),
       aiEnabled: typeof body.aiEnabled === "boolean" ? body.aiEnabled : undefined,
       aiBaseUrl: aiBaseUrl || undefined,
       aiApiKey: body.aiApiKey,

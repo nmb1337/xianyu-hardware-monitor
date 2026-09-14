@@ -106,6 +106,7 @@ export class MonitorDatabase {
         status TEXT NOT NULL DEFAULT 'pending',
         attempts INTEGER NOT NULL DEFAULT 0,
         last_error TEXT,
+        delivered_to TEXT NOT NULL DEFAULT '[]',
         created_at INTEGER NOT NULL,
         sent_at INTEGER,
         available_at INTEGER NOT NULL
@@ -160,6 +161,12 @@ export class MonitorDatabase {
     const blockedColumns = this.db.prepare("PRAGMA table_info(blocked_listings)").all();
     if (!blockedColumns.some((column) => column.name === "block_reason")) {
       this.db.exec("ALTER TABLE blocked_listings ADD COLUMN block_reason TEXT NOT NULL DEFAULT ''");
+    }
+
+    // Per-recipient delivery tracking so retries only target QQ numbers that failed.
+    const notificationColumns = this.db.prepare("PRAGMA table_info(notifications)").all();
+    if (!notificationColumns.some((column) => column.name === "delivered_to")) {
+      this.db.exec("ALTER TABLE notifications ADD COLUMN delivered_to TEXT NOT NULL DEFAULT '[]'");
     }
 
     if (this.getSetting("search_price_parser_version") !== "2") {
@@ -710,6 +717,13 @@ export class MonitorDatabase {
       .run(now(), id);
   }
 
+  markNotificationDelivered(id, deliveredTo) {
+    const list = [...new Set((Array.isArray(deliveredTo) ? deliveredTo : []).map((qq) => String(qq)))];
+    this.db
+      .prepare("UPDATE notifications SET delivered_to = ? WHERE id = ?")
+      .run(JSON.stringify(list), id);
+  }
+
   markNotificationFailed(id, attempts, errorMessage) {
     const terminal = attempts >= 6;
     const delayMilliseconds = Math.min(20 * 60_000, 20_000 * 2 ** Math.max(0, attempts - 1));
@@ -729,6 +743,7 @@ export class MonitorDatabase {
   }
 
   retryFailedNotifications() {
+    // delivered_to is kept: already delivered QQ numbers are never messaged twice.
     return this.db
       .prepare(`
         UPDATE notifications

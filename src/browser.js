@@ -549,8 +549,8 @@ export class XianyuBrowser {
       if (!hasCookie) {
         this.loginState = "waiting_for_login";
         this.message = "需要在浏览器中登录闲鱼后才能扫描。";
-        await this.page.goto("https://www.goofish.com/", { waitUntil: "domcontentloaded", timeout: 60_000 });
-        await this.page.bringToFront();
+        // Do not navigate here: the tracked tab may be the QR login page the user is scanning.
+        await this.page.bringToFront().catch(() => {});
         throw new Error(this.message);
       }
 

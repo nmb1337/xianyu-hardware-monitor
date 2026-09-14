@@ -229,3 +229,46 @@ test("a single-browser setup reopens the same browser and stops after repeated f
   assert.equal(f.monitor.status().recoveryState, "manual");
   assert.equal(f.monitor.status().accessPaused, true);
 });
+
+test("a hand-opened QR login keeps its window when a scan still sees the login page", async (t) => {
+  const f = fixture(t);
+  f.logoutCache();
+  await f.monitor.openLogin();
+  assert.equal(f.calls.open, 1);
+
+  f.failScans(1, "waiting_for_login");
+  await assert.rejects(f.monitor.scanNow(f.rules[0].id));
+  assert.equal(f.monitor.status().accessPaused, true);
+  assert.equal(f.monitor.status().recoveryState, "manual_login");
+  assert.equal(f.calls.close, 0);
+  assert.equal(f.calls.switch, 0);
+  assert.ok(f.calls.messages.some((message) => /保持打开/.test(message)));
+
+  const scansBefore = f.calls.scan;
+  f.login();
+  f.monitor.start();
+  await f.poll(3);
+  assert.equal(f.monitor.status().accessPaused, false);
+  assert.equal(f.calls.close, 0);
+  assert.ok(f.calls.scan > scansBefore);
+});
+
+test("while a hand-opened login window waits for a scan the loop neither scans nor closes it", async (t) => {
+  const f = fixture(t);
+  f.logoutCache();
+  await f.monitor.openLogin();
+  f.monitor.start();
+  await f.poll(2);
+
+  assert.equal(f.calls.scan, 0);
+  assert.equal(f.calls.close, 0);
+  assert.equal(f.calls.switch, 0);
+  assert.equal(f.monitor.status().accessPaused, false);
+  assert.match(f.monitor.status().lastActivity, /扫码/);
+
+  f.login();
+  await f.poll(3);
+  assert.ok(f.calls.scan >= 1);
+  assert.equal(f.calls.close, 0);
+  assert.equal(f.calls.switch, 0);
+});

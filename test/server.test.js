@@ -298,3 +298,41 @@ test("rules save without a scan interval and the retired mode endpoint returns 4
   assert.equal(mode.status, 404);
   await mode.json();
 });
+
+test("settings accept multiple receiver QQ numbers and reject invalid lists", async (t) => {
+  const { services, baseUrl } = await startApplication(t);
+  services.database.updateSettings({
+    astrbotBaseUrl: "http://127.0.0.1:6185",
+    astrbotApiKey: "fixture-notification-key",
+    astrbotBotId: "fixture-bot",
+    astrbotReceiverQq: "123456789"
+  });
+
+  const saved = await fetch(`${baseUrl}/api/settings`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ astrbotReceiverQq: "123456789, 987654321;123456789" })
+  });
+  assert.equal(saved.status, 200);
+  assert.equal((await saved.json()).astrbotReceiverQq, "123456789, 987654321");
+  assert.equal(services.database.getSetting("astrbot_receiver_qq"), "123456789, 987654321");
+  assert.equal(services.notifier.configured(), true);
+
+  const invalid = await fetch(`${baseUrl}/api/settings`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ astrbotReceiverQq: "123456789, abc" })
+  });
+  assert.equal(invalid.status, 400);
+  assert.match((await invalid.json()).error, /接收 QQ 号格式无效/);
+  assert.equal(services.database.getSetting("astrbot_receiver_qq"), "123456789, 987654321");
+
+  const tooMany = Array.from({ length: 11 }, (_, index) => String(200000000 + index)).join(",");
+  const rejected = await fetch(`${baseUrl}/api/settings`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ astrbotReceiverQq: tooMany })
+  });
+  assert.equal(rejected.status, 400);
+  assert.match((await rejected.json()).error, /最多支持 10 个/);
+});

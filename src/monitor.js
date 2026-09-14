@@ -47,6 +47,8 @@ export class MonitorService {
     this.scanOperation = Promise.resolve();
     this.scanGeneration = 0;
     this.restartLoginPromise = null;
+    // True while the user is expected to scan a QR code in the login window we opened.
+    this.manualLoginMode = false;
   }
 
   status() {
@@ -142,6 +144,7 @@ export class MonitorService {
     try {
       const listings = await this.browser.scan(rule);
       this.autoRecoveryStreak = 0;
+      this.manualLoginMode = false;
       let matched = 0;
       let queued = 0;
       let alreadySeen = 0;
@@ -255,6 +258,7 @@ export class MonitorService {
     if (this.restartLoginPromise) {
       return this.restartLoginPromise;
     }
+    this.manualLoginMode = true;
     this.scanGeneration += 1;
     this.ai?.cancelPending?.();
     this.restartLoginPromise = this.#withScanOperation(async () => {
@@ -271,6 +275,7 @@ export class MonitorService {
   }
 
   async openLogin() {
+    this.manualLoginMode = true;
     return this.#withScanOperation(async () => {
       if (this.#isAccessPaused()) {
         await this.#openBrowser();
@@ -281,6 +286,7 @@ export class MonitorService {
   }
 
   async closeBrowser() {
+    this.manualLoginMode = false;
     this.scanGeneration += 1;
     this.ai?.cancelPending?.();
     return this.#withScanOperation(async () => {
@@ -299,6 +305,7 @@ export class MonitorService {
   }
 
   async switchBrowser() {
+    this.manualLoginMode = true;
     return this.#withScanOperation(async () => {
       if (this.activeRuleId) {
         throw new Error("当前仍在扫描，请等待本轮结束后再切换浏览器。");
@@ -344,6 +351,7 @@ export class MonitorService {
   }
 
   async #completeAccessRecovery({ automatic = false } = {}) {
+    this.manualLoginMode = false;
     this.accessPaused = false;
     this.accessPauseKind = "";
     this.accessRecoveryState = "none";
@@ -362,6 +370,10 @@ export class MonitorService {
 
   async #runLoop() {
     while (this.running) {
+      if (this.manualLoginMode && !this.#isAccessPaused()) {
+        await this.#awaitManualLogin();
+        continue;
+      }
       if (this.#isAccessPaused()) {
         await this.#recoverAccess();
         if (this.#isAccessPaused()) {
@@ -444,9 +456,16 @@ export class MonitorService {
       this.lastActivity = this.#accessPauseMessage();
       return;
     }
-    this.accessRecoveryState = "closing";
     this.manualRecoveryNoticeSent = false;
     this.recoveryReportPending = false;
+    if (this.manualLoginMode) {
+      // The user is scanning a QR code in the window we just opened: keep it alive.
+      this.accessRecoveryState = "manual_login";
+      this.lastActivity = this.#accessPauseMessage();
+      await this.#notifyAccessPause();
+      return;
+    }
+    this.accessRecoveryState = "closing";
     this.lastActivity = this.#accessPauseMessage();
     if (typeof this.browser.close === "function") {
       try {
@@ -460,6 +479,38 @@ export class MonitorService {
     }
     this.lastActivity = this.#accessPauseMessage();
     await this.#notifyAccessPause();
+  }
+
+  async #awaitManualLogin() {
+    let status = null;
+    try {
+      // The window is the user's workspace right now: never scan, navigate, close or switch it.
+      status = await this.browser.verifyLogin({ openIfNeeded: false });
+    } catch {
+      // The window disappeared while checking; fall back to the regular scan loop.
+      this.manualLoginMode = false;
+      return;
+    }
+    if (!status.browserOpen) {
+      // Closing a login window manually must not reopen it; wait for an explicit request.
+      this.manualLoginMode = false;
+      this.accessPaused = true;
+      this.accessPauseKind = "login";
+      this.accessRecoveryState = "closed_by_user";
+      this.accessPauseNotified = false;
+      this.manualRecoveryNoticeSent = false;
+      this.recoveryReportPending = false;
+      this.lastActivity = this.#accessPauseMessage();
+      await this.#notifyAccessPause();
+      return;
+    }
+    if (status.state === "verified") {
+      this.manualLoginMode = false;
+      this.lastActivity = "已确认扫码登录成功，继续按规则顺序查询。";
+      return;
+    }
+    this.lastActivity = "等待扫码登录：登录窗口已保持打开，请直接在浏览器中扫码；登录成功后会自动继续查询。";
+    await this.#waitForLoop(6_000);
   }
 
   async #recoverAccess() {
@@ -476,7 +527,7 @@ export class MonitorService {
         await this.#openBrowser({ automatic: true }).catch(() => {});
         return;
       }
-      if (this.accessRecoveryState === "checking") {
+      if (this.accessRecoveryState === "checking" || this.accessRecoveryState === "manual_login") {
         await this.#checkAccessRecovery();
       }
     });
@@ -533,14 +584,14 @@ export class MonitorService {
     try {
       status = await this.browser.verifyLogin({ openIfNeeded: false });
     } catch {
-      this.accessRecoveryState = "checking";
+      this.accessRecoveryState = this.manualLoginMode ? "manual_login" : "checking";
       return;
     }
     if (status.state === "verified") {
       await this.#completeAccessRecovery({ automatic: true });
       return;
     }
-    this.accessRecoveryState = "checking";
+    this.accessRecoveryState = this.manualLoginMode ? "manual_login" : "checking";
   }
 
   async #notifyAccessPause() {
@@ -548,9 +599,11 @@ export class MonitorService {
       return;
     }
     this.accessPauseNotified = true;
-    const followUp = this.#canAutoSwitch()
-      ? `即将自动切换到 ${this.browser.status().alternateBrowserName} 并确认缓存登录；确认有效后自动继续查询，不会填写密码或处理验证码。`
-      : "将复用已缓存的登录资料；不会填写密码或处理验证码。";
+    const followUp = this.manualLoginMode
+      ? "登录窗口会保持打开，请直接在浏览器中扫码登录；确认有效后自动继续查询。"
+      : this.#canAutoSwitch()
+        ? `即将自动切换到 ${this.browser.status().alternateBrowserName} 并确认缓存登录；确认有效后自动继续查询，不会填写密码或处理验证码。`
+        : "将复用已缓存的登录资料；不会填写密码或处理验证码。";
     await this.#sendStatusMessage(`${this.#accessPauseMessage()}${followUp}`);
   }
 
@@ -600,6 +653,9 @@ export class MonitorService {
         break;
       case "opening":
         action = "正在打开登录窗口并确认登录。";
+        break;
+      case "manual_login":
+        action = "登录窗口已保持打开，请直接在浏览器中扫码登录；确认有效后会自动继续查询，无需点击按钮。";
         break;
       case "checking":
         action = "登录窗口已打开，正在自动确认登录；有效后立即继续查询。如需人工登录或验证，完成后无需点击按钮。";
