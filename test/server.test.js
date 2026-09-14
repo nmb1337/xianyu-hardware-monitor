@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { once } from "node:events";
 import { createApplication } from "../src/server.js";
 
@@ -366,4 +369,29 @@ test("browser network settings accept direct and proxy modes and reject malforme
   assert.equal(invalid.status, 400);
   assert.match(invalid.body.error, /端口/);
   assert.equal(services.database.getSetting("browser_proxy"), "");
+});
+
+test("resetting the browser profile from the dashboard returns a fresh session state", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "xianyu-reset-profile-"));
+  const app = createApplication({ databasePath: join(directory, "monitor.sqlite") });
+  t.after(async () => {
+    if (app.server.listening) {
+      await new Promise((resolve) => {
+        app.server.close(() => resolve());
+        app.server.closeIdleConnections?.();
+      });
+    }
+    await app.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  app.server.listen(0, "127.0.0.1");
+  await once(app.server, "listening");
+  const baseUrl = `http://127.0.0.1:${app.server.address().port}`;
+
+  const response = await fetch(`${baseUrl}/api/browser/reset-profile`, { method: "POST" });
+  assert.equal(response.status, 200);
+  const status = await response.json();
+  assert.equal(status.state, "not_started");
+  assert.equal(status.browserOpen, false);
+  assert.match(status.message, /资料已清空/);
 });

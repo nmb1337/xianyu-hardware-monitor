@@ -9,6 +9,7 @@ const state = {
   aiEnabled: false,
   aiSettingsDirty: false,
   aiSettingsRevision: 0,
+  browserNetworkDirty: false,
   savingAiSettings: false
 };
 
@@ -317,12 +318,16 @@ async function refresh() {
   if (document.activeElement !== $("#astrbot-qq")) {
     $("#astrbot-qq").value = settings.astrbotReceiverQq || "";
   }
+  // Never overwrite a network choice the user is still editing: the 5s poll must
+  // not reset the dropdown (it used to also disable the proxy address input).
   const proxySetting = settings.browserProxy || "";
-  if (document.activeElement !== $("#browser-proxy-url")) {
+  const networkIdle = !state.browserNetworkDirty
+    && document.activeElement !== $("#browser-proxy-mode")
+    && document.activeElement !== $("#browser-proxy-url");
+  if (networkIdle) {
     const proxyMode = !proxySetting ? "system" : proxySetting.toLowerCase() === "direct" ? "direct" : "custom";
     $("#browser-proxy-mode").value = proxyMode;
     $("#browser-proxy-url").value = proxyMode === "custom" ? proxySetting : "";
-    $("#browser-proxy-url").disabled = proxyMode !== "custom";
   }
   // An older poll must not overwrite a toggle or an unsaved settings draft.
   if (aiRevision === state.aiSettingsRevision && !state.savingAiSettings) {
@@ -571,8 +576,8 @@ async function bootstrap() {
     });
   });
 
-  $("#browser-proxy-mode").addEventListener("change", () => {
-    $("#browser-proxy-url").disabled = $("#browser-proxy-mode").value !== "custom";
+  $("#browser-network-form").addEventListener("input", () => {
+    state.browserNetworkDirty = true;
   });
 
   $("#browser-network-form").addEventListener("submit", async (event) => {
@@ -581,6 +586,7 @@ async function bootstrap() {
     const proxyUrl = $("#browser-proxy-url").value.trim();
     if (mode === "custom" && !proxyUrl) {
       toast("请填写代理地址，例如 http://127.0.0.1:7890", true);
+      $("#browser-proxy-url").focus();
       return;
     }
     await withAction(event.submitter, async () => {
@@ -590,6 +596,7 @@ async function bootstrap() {
           browserProxy: mode === "system" ? "" : mode === "direct" ? "direct" : proxyUrl
         })
       });
+      state.browserNetworkDirty = false;
       toast("网络出口已保存；点“关闭浏览器”再“打开登录”后生效。");
     });
   });
@@ -663,6 +670,18 @@ async function bootstrap() {
       toast("浏览器已关闭。");
     })
   );
+  $("#reset-profile").addEventListener("click", (event) => {
+    const confirmed = confirm(
+      "将清空本地浏览器资料（缓存、Cookie、登录状态），相当于换一台新设备，需要重新扫码登录。监控规则与提醒记录不受影响。继续吗？"
+    );
+    if (!confirmed) {
+      return undefined;
+    }
+    return withAction(event.currentTarget, async () => {
+      await request("/api/browser/reset-profile", { method: "POST" });
+      toast("浏览器资料已清空；点“打开登录”重新扫码。");
+    });
+  });
   $("#test-astrbot").addEventListener("click", (event) =>
     withAction(event.currentTarget, async () => {
       await request("/api/settings/test-astrbot", { method: "POST" });

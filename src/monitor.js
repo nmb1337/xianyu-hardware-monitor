@@ -304,6 +304,21 @@ export class MonitorService {
     });
   }
 
+  async resetBrowserProfile() {
+    this.manualLoginMode = false;
+    this.scanGeneration += 1;
+    this.ai?.cancelPending?.();
+    return this.#withScanOperation(async () => {
+      if (this.#isAccessPaused()) {
+        // The cleared profile also clears the login; stay paused until the user asks again.
+        this.accessRecoveryState = "closed_by_user";
+      }
+      const status = await this.browser.resetProfile();
+      this.lastActivity = "浏览器资料已清空（相当于换新设备），请点“打开登录”重新扫码。";
+      return status;
+    });
+  }
+
   async switchBrowser() {
     this.manualLoginMode = true;
     return this.#withScanOperation(async () => {

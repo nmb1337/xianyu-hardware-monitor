@@ -52,6 +52,7 @@
             <button id="switch-browser" class="button" title="遇到验证时会自动切换；也可随时手动切换">切换浏览器</button>
             <button id="verify-login" class="button">验证登录</button>
             <button id="resume-monitor" class="button primary" disabled>恢复扫描</button>
+            <button id="reset-profile" class="button danger" title="清空本地浏览器资料（缓存、Cookie、登录状态），相当于换一台新设备；需要重新扫码登录">重置资料</button>
             <button id="close-browser" class="icon-button" title="关闭浏览器" aria-label="关闭浏览器">X</button>
           </div>
         </div>
@@ -71,7 +72,7 @@
             <input id="browser-proxy-url" name="browserProxyUrl" maxlength="200" placeholder="例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080">
           </label>
           <button class="button primary" type="submit">保存网络设置</button>
-          <small class="muted">保存后点“关闭浏览器”，再点“打开登录”生效；<span id="browser-network-state">当前：跟随系统代理</span></small>
+          <small class="muted">选“自定义代理”后在右侧填写地址；保存后点“关闭浏览器”，再点“打开登录”生效；<span id="browser-network-state">当前：跟随系统代理</span></small>
         </form>
       </section>
 

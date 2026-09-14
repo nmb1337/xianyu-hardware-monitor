@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { XianyuBrowser } from "../src/browser.js";
@@ -73,4 +73,27 @@ test("switchBrowser closes the current session and selects the other browser pro
   assert.equal(status.canSwitch, true);
   assert.equal(status.browserOpen, false);
   assert.equal(browser.profileDirectory, resolve("chrome-profile"));
+});
+
+test("resetProfile clears the stored browser data so the next launch looks like a new device", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "xianyu-profile-reset-"));
+  const browser = new XianyuBrowser({
+    dataDirectory: directory,
+    executablePath: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+  });
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  mkdirSync(browser.profileDirectory, { recursive: true });
+  writeFileSync(join(browser.profileDirectory, "Cookies"), "fixture");
+  let closed = 0;
+  browser.context = { close: async () => { closed += 1; } };
+
+  const status = await browser.resetProfile();
+  assert.equal(closed, 1);
+  assert.equal(status.state, "not_started");
+  assert.equal(status.browserOpen, false);
+  assert.equal(existsSync(browser.profileDirectory), false);
+
+  // A second reset without an open browser is still safe (nothing to delete).
+  const again = await browser.resetProfile();
+  assert.equal(again.state, "not_started");
 });

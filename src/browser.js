@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { URL } from "node:url";
 import { resolve, win32 } from "node:path";
 import { parsePrice } from "./filter.js";
@@ -582,6 +582,27 @@ export class XianyuBrowser {
       await this.#discardContext();
       this.loginState = "not_started";
       this.message = "浏览器已关闭。";
+      return this.status();
+    }, { retryClosed: false });
+  }
+
+  async resetProfile() {
+    return this.#withOperation(async () => {
+      await this.#discardContext();
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          // A fresh profile directory means no cookies or local device identifiers survive.
+          rmSync(this.profileDirectory, { recursive: true, force: true });
+          break;
+        } catch {
+          if (attempt === 2) {
+            throw new Error("浏览器资料清空失败，请先关闭浏览器窗口后重试。");
+          }
+          await new Promise((resolve) => setTimeout(resolve, 400));
+        }
+      }
+      this.loginState = "not_started";
+      this.message = "浏览器资料已清空，请重新打开登录窗口扫码。";
       return this.status();
     }, { retryClosed: false });
   }

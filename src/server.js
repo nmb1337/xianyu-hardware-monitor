@@ -326,6 +326,9 @@ async function routeApi(request, response, url, services) {
   if (method === "POST" && path === "/api/browser/close") {
     return sendJson(response, 200, await monitor.closeBrowser());
   }
+  if (method === "POST" && path === "/api/browser/reset-profile") {
+    return sendJson(response, 200, await monitor.resetBrowserProfile());
+  }
 
   sendJson(response, 404, { error: "未找到 API" });
 }
