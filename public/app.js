@@ -115,8 +115,8 @@ function renderStatus(status) {
   $("#search-schedule").textContent = status.accessPaused
     ? "自动查询已暂停，正在等待登录恢复"
     : !status.running
-      ? `自动查询未启动；启动后按规则顺序连续查询（${nextRule}）`
-      : `按规则顺序连续查询（${status.enabledRuleCount ?? 0} 条）；${nextRule}`;
+      ? `自动查询未启动；启动后按规则顺序查询（${nextRule}）`
+      : `按规则顺序查询（${status.enabledRuleCount ?? 0} 条，每条间隔随机 45–75 秒）；${nextRule}`;
   const resumeButton = $("#resume-monitor");
   const recoveryBusy = ["closing", "opening"].includes(status.recoveryState);
   resumeButton.disabled = !status.accessPaused || recoveryBusy || resumeButton.dataset.loading === "true";
@@ -134,7 +134,7 @@ function renderStatus(status) {
   $("#access-recovery").textContent = status.accessPaused ? status.lastActivity
     : browser.state === "verified" ? "会话已验证，无待处理恢复任务"
       : browser.message || "尚未验证闲鱼会话";
-  $("#search-frequency").textContent = "按规则顺序连续查询，不设间隔、次数上限与夜间静默";
+  $("#search-frequency").textContent = "按规则顺序查询，每条之间随机等待 45–75 秒（平均约 1 分钟一条）";
 }
 
 function renderRules(rules) {
@@ -149,7 +149,7 @@ function renderRules(rules) {
   const enabledCount = enabledRules.length;
   $("#rule-count").textContent = `${rules.length} 条规则，${enabledCount} 条启用`;
   $("#rotation-estimate").textContent = enabledCount
-    ? `将按顺序连续查询 ${enabledCount} 条启用规则，循环执行`
+    ? `将按顺序查询 ${enabledCount} 条启用规则（每条间隔随机 45–75 秒），循环执行`
     : "暂无已启用规则";
   const body = $("#rules-body");
   if (!rules.length) {

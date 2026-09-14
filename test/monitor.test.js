@@ -72,6 +72,7 @@ test("monitor baselines existing results then alerts only a new low-price result
 });
 
 test("automatic scanning walks enabled rules in creation order and keeps rotating", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
   const database = new MonitorDatabase(":memory:");
   const rules = Array.from({ length: 3 }, (_, index) => makeRule(database, {
     name: `GPU ${index}`,
@@ -93,7 +94,9 @@ test("automatic scanning walks enabled rules in creation order and keeps rotatin
   });
 
   monitor.start();
-  for (let index = 0; index < 50 && scanned.length < 6; index += 1) {
+  // 每次扫描之间会随机等待 45–75 秒：用假定时器把间隔逐段推进。
+  for (let index = 0; index < 20 && scanned.length < 6; index += 1) {
+    t.mock.timers.tick(80_000);
     await setImmediate();
   }
   await monitor.stop();

@@ -109,7 +109,7 @@ for (const [name, width, running, accessPaused] of [
     await page.goto("http://monitor.test/");
     await page.waitForFunction(() => document.querySelector("#rules-body").children.length === 5);
     assert.equal(await page.locator("#browser-name").innerText(), "Microsoft Edge");
-    assert.match(await page.locator("#rotation-estimate").innerText(), /按顺序连续查询 5 条/);
+    assert.match(await page.locator("#rotation-estimate").innerText(), /按顺序查询 5 条/);
     assert.equal(
       await page.locator('[data-action="scan"]:disabled').count(),
       accessPaused ? 5 : 0
@@ -128,7 +128,7 @@ for (const [name, width, running, accessPaused] of [
     assert.equal(await page.locator("#ai-rejections-body img, #ai-rejections-body script").count(), 0);
     assert.match(
       await page.locator("#search-schedule").innerText(),
-      accessPaused ? /已暂停/ : running ? /连续查询/ : /未启动/
+      accessPaused ? /已暂停/ : running ? /随机 45–75 秒/ : /未启动/
     );
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
     assert.equal(overflow, false);
@@ -143,7 +143,7 @@ for (const [name, width, running, accessPaused] of [
       assert.equal(await page.locator("#ai-rejections .table-wrap").evaluate((element) =>
         element.scrollWidth > element.clientWidth), false);
     }
-    assert.match(await page.locator("#search-frequency").innerText(), /连续查询/);
+    assert.match(await page.locator("#search-frequency").innerText(), /随机等待 45–75 秒/);
     await page.locator("#restart-login").click();
     await page.waitForFunction(() => document.querySelector("#access-recovery").textContent.includes("完成登录"));
     assert.equal(restarts, 1);

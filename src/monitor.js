@@ -1,6 +1,10 @@
 import { categoryLabel } from "./categories.js";
 import { evaluateListing } from "./filter.js";
 
+// Scan pacing: about one search per minute, with a random gap so the rhythm is not fixed.
+const SCAN_INTERVAL_MIN_MS = 45_000;
+const SCAN_INTERVAL_MAX_MS = 75_000;
+
 function roundPrice(price) {
   return Number(price).toLocaleString("zh-CN", {
     maximumFractionDigits: 2
@@ -80,7 +84,7 @@ export class MonitorService {
     this.startedAt = Date.now();
     this.lastActivity = this.#isAccessPaused()
       ? this.#accessPauseMessage()
-      : "监控已启动，将按规则顺序连续查询。";
+      : "监控已启动，将按规则顺序查询；每条之间随机等待 45–75 秒。";
     this.loopPromise = this.#runLoop();
     this.notificationTimer = setInterval(() => {
       this.notifier.processOne().catch(() => {});
@@ -415,7 +419,18 @@ export class MonitorService {
       await this.notifier.processOne();
       // Yield to the event loop so even instant failures cannot starve the process.
       await new Promise((resolve) => setImmediate(resolve));
+      if (this.#isAccessPaused() || this.manualLoginMode) {
+        // Recovery and manual logins must react at once instead of waiting out the interval.
+        continue;
+      }
+      // One search roughly per minute; the random gap keeps the rhythm irregular.
+      await this.#waitForLoop(this.#nextScanDelay());
     }
+  }
+
+  #nextScanDelay() {
+    const range = SCAN_INTERVAL_MAX_MS - SCAN_INTERVAL_MIN_MS + 1;
+    return SCAN_INTERVAL_MIN_MS + Math.floor(Math.random() * range);
   }
 
   #waitForLoop(milliseconds) {

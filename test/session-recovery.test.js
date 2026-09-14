@@ -272,3 +272,26 @@ test("while a hand-opened login window waits for a scan the loop neither scans n
   assert.equal(f.calls.close, 0);
   assert.equal(f.calls.switch, 0);
 });
+
+test("scans are spaced by a jittered gap of roughly one minute", async (t) => {
+  const f = fixture(t);
+  f.monitor.start();
+  for (let index = 0; index < 10; index += 1) {
+    await setImmediate();
+  }
+  assert.equal(f.calls.scan, 1);
+
+  // 随机间隔最短 45 秒：44 秒时绝不能再发起下一条查询。
+  t.mock.timers.tick(44_000);
+  for (let index = 0; index < 3; index += 1) {
+    await setImmediate();
+  }
+  assert.equal(f.calls.scan, 1, "两次扫描的间隔不能短于 45 秒");
+
+  // 再推进超过最大间隔（75 秒）后，下一条查询一定已经开始。
+  t.mock.timers.tick(76_000);
+  for (let index = 0; index < 5 && f.calls.scan < 2; index += 1) {
+    await setImmediate();
+  }
+  assert.equal(f.calls.scan, 2, "随机间隔结束后应开始下一条查询");
+});
