@@ -7,7 +7,7 @@ import { splitTerms } from "./filter.js";
 import { MonitorDatabase } from "./db.js";
 import { AstrBotNotifier, normalizeAstrBotBaseUrl, parseReceiverQqList } from "./astrbot.js";
 import { AiReviewer, normalizeAiBaseUrl } from "./ai.js";
-import { XianyuBrowser } from "./browser.js";
+import { XianyuBrowser, parseBrowserProxySetting } from "./browser.js";
 import { MonitorService } from "./monitor.js";
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
@@ -242,6 +242,11 @@ async function routeApi(request, response, url, services) {
       ? currentSettings.astrbotReceiverQq
       : String(body.astrbotReceiverQq).trim();
     const receivers = receiverInput ? parseReceiverQqList(receiverInput) : [];
+    const browserProxy = typeof body.browserProxy === "string" ? body.browserProxy.trim() : undefined;
+    if (browserProxy) {
+      // Throws a friendly message for unsupported or malformed proxy values.
+      parseBrowserProxySetting(browserProxy);
+    }
     const botId = body.astrbotBotId === undefined
       ? currentSettings.astrbotBotId
       : String(body.astrbotBotId).trim();
@@ -261,6 +266,7 @@ async function routeApi(request, response, url, services) {
       astrbotApiKey: body.astrbotApiKey,
       astrbotBotId: botId,
       astrbotReceiverQq: receivers.join(", "),
+      browserProxy,
       aiEnabled: typeof body.aiEnabled === "boolean" ? body.aiEnabled : undefined,
       aiBaseUrl: aiBaseUrl || undefined,
       aiApiKey: body.aiApiKey,
@@ -328,7 +334,10 @@ export function createApplication({ databasePath = resolve(dataDirectory, "monit
   loadEnvironment();
   const database = new MonitorDatabase(databasePath);
   database.initializeFromEnvironment(process.env);
-  const browser = new XianyuBrowser({ dataDirectory: dirname(databasePath) });
+  const browser = new XianyuBrowser({
+    dataDirectory: dirname(databasePath),
+    proxyResolver: () => database.getSetting("browser_proxy") ?? ""
+  });
   const notifier = new AstrBotNotifier(database);
   const ai = new AiReviewer(database);
   const monitor = new MonitorService({ database, browser, notifier, ai });

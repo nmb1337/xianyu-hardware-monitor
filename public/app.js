@@ -97,6 +97,7 @@ function renderStatus(status) {
     ? ({ verified: "已登录", waiting_for_login: "等待登录", waiting_for_verification: "等待验证" }[browser.state] ?? "未连接")
     : "未找到浏览器";
   $("#browser-message").textContent = browser.message || browser.executablePath || "-";
+  $("#browser-network-state").textContent = `当前：${browser.network || "跟随系统代理"}`;
   $("#astrbot-state").textContent = status.astrbotConfigured ? "已配置" : "未配置";
   $("#astrbot-message").textContent = status.astrbotConfigured
     ? "AstrBot + NapCat QQ 私聊已启用"
@@ -315,6 +316,13 @@ async function refresh() {
   }
   if (document.activeElement !== $("#astrbot-qq")) {
     $("#astrbot-qq").value = settings.astrbotReceiverQq || "";
+  }
+  const proxySetting = settings.browserProxy || "";
+  if (document.activeElement !== $("#browser-proxy-url")) {
+    const proxyMode = !proxySetting ? "system" : proxySetting.toLowerCase() === "direct" ? "direct" : "custom";
+    $("#browser-proxy-mode").value = proxyMode;
+    $("#browser-proxy-url").value = proxyMode === "custom" ? proxySetting : "";
+    $("#browser-proxy-url").disabled = proxyMode !== "custom";
   }
   // An older poll must not overwrite a toggle or an unsaved settings draft.
   if (aiRevision === state.aiSettingsRevision && !state.savingAiSettings) {
@@ -560,6 +568,29 @@ async function bootstrap() {
       });
       $("#astrbot-api-key").value = "";
       toast("QQ 提醒设置已保存。");
+    });
+  });
+
+  $("#browser-proxy-mode").addEventListener("change", () => {
+    $("#browser-proxy-url").disabled = $("#browser-proxy-mode").value !== "custom";
+  });
+
+  $("#browser-network-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const mode = $("#browser-proxy-mode").value;
+    const proxyUrl = $("#browser-proxy-url").value.trim();
+    if (mode === "custom" && !proxyUrl) {
+      toast("请填写代理地址，例如 http://127.0.0.1:7890", true);
+      return;
+    }
+    await withAction(event.submitter, async () => {
+      await request("/api/settings", {
+        method: "PUT",
+        body: JSON.stringify({
+          browserProxy: mode === "system" ? "" : mode === "direct" ? "direct" : proxyUrl
+        })
+      });
+      toast("网络出口已保存；点“关闭浏览器”再“打开登录”后生效。");
     });
   });
 

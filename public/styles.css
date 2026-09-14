@@ -224,6 +224,20 @@ section {
   margin: 0;
 }
 
+.network-form {
+  display: grid;
+  grid-template-columns: minmax(0, 220px) minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+  padding: 14px;
+  border: 1px solid #d4dce5;
+  background: #ffffff;
+}
+
+.network-form small {
+  grid-column: 1 / -1;
+}
+
 .rule-form {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -537,7 +551,8 @@ a:hover {
   }
 
   .rule-form,
-  .settings-form {
+  .settings-form,
+  .network-form {
     grid-template-columns: 1fr;
   }
 

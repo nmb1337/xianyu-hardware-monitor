@@ -57,6 +57,22 @@
         </div>
         <p id="access-recovery" class="muted" role="status" aria-live="polite">-</p>
         <p id="search-frequency" class="muted">-</p>
+        <form id="browser-network-form" class="network-form">
+          <label>
+            <span>网络出口</span>
+            <select id="browser-proxy-mode" name="browserProxyMode">
+              <option value="system">跟随系统代理</option>
+              <option value="direct">直连（不使用代理）</option>
+              <option value="custom">自定义代理</option>
+            </select>
+          </label>
+          <label>
+            <span>代理地址</span>
+            <input id="browser-proxy-url" name="browserProxyUrl" maxlength="200" placeholder="例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080">
+          </label>
+          <button class="button primary" type="submit">保存网络设置</button>
+          <small class="muted">保存后点“关闭浏览器”，再点“打开登录”生效；<span id="browser-network-state">当前：跟随系统代理</span></small>
+        </form>
       </section>
 
       <section class="rules-section">

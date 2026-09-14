@@ -42,6 +42,38 @@ function alternateBrowserExecutable(currentPath) {
   return DEFAULT_BROWSER_PATHS.find((path) => existsSync(path) && !sameExecutable(path, currentPath)) ?? null;
 }
 
+// Turns the stored network setting into browser launch options.
+// "" / "system" keep the Windows system proxy, "direct" bypasses it entirely,
+// anything else is treated as an explicit HTTP/SOCKS5 proxy address.
+export function parseBrowserProxySetting(value) {
+  const raw = String(value ?? "").trim();
+  const lowered = raw.toLowerCase();
+  if (!raw || lowered === "system") {
+    return { mode: "system" };
+  }
+  if (lowered === "direct") {
+    return { mode: "direct" };
+  }
+  let url;
+  try {
+    url = new URL(raw.includes("://") ? raw : `http://${raw}`);
+  } catch {
+    throw new Error("代理地址格式无效，例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080");
+  }
+  if (!["http:", "https:", "socks5:"].includes(url.protocol)) {
+    throw new Error("代理只支持 http://、https:// 或 socks5:// 地址");
+  }
+  if (!url.hostname || !url.port) {
+    throw new Error("代理地址必须包含主机和端口，例如 http://127.0.0.1:7890");
+  }
+  const proxy = { server: `${url.protocol}//${url.hostname}:${url.port}` };
+  if (url.username) {
+    proxy.username = decodeURIComponent(url.username);
+    proxy.password = decodeURIComponent(url.password);
+  }
+  return { mode: "custom", proxy };
+}
+
 function normalizeUrl(value) {
   if (!value) {
     return "";
@@ -181,11 +213,13 @@ export class XianyuBrowser {
   constructor({
     dataDirectory,
     executablePath = browserExecutable(),
-    alternateExecutablePath = alternateBrowserExecutable(executablePath)
+    alternateExecutablePath = alternateBrowserExecutable(executablePath),
+    proxyResolver = () => ""
   }) {
     this.dataDirectory = resolve(dataDirectory);
     this.executablePath = executablePath;
     this.alternateExecutablePath = alternateExecutablePath;
+    this.proxyResolver = typeof proxyResolver === "function" ? proxyResolver : () => "";
     this.browserName = browserNameForExecutable(executablePath);
     // Keep each browser's persistent login data separate; never migrate cookies.
     this.profileDirectory = resolve(this.dataDirectory,
@@ -207,8 +241,35 @@ export class XianyuBrowser {
       alternateBrowserName: browserNameForExecutable(this.alternateExecutablePath),
       state: this.loginState,
       message: this.message,
+      network: this.#networkLabel(),
       browserOpen: Boolean(this.context)
     };
+  }
+
+  #browserNetwork() {
+    let setting = "";
+    try {
+      setting = this.proxyResolver() ?? "";
+    } catch {
+      setting = "";
+    }
+    try {
+      return parseBrowserProxySetting(setting);
+    } catch {
+      // Never let a malformed stored value block the browser from starting.
+      return { mode: "system" };
+    }
+  }
+
+  #networkLabel() {
+    const network = this.#browserNetwork();
+    if (network.mode === "direct") {
+      return "直连（不使用代理）";
+    }
+    if (network.mode === "custom") {
+      return `自定义代理 ${network.proxy.server}`;
+    }
+    return "跟随系统代理";
   }
 
   async #loadPlaywright() {
@@ -245,12 +306,21 @@ export class XianyuBrowser {
 
     const chromium = await this.#loadPlaywright();
     mkdirSync(this.profileDirectory, { recursive: true });
-    const context = await chromium.launchPersistentContext(this.profileDirectory, {
+    const network = this.#browserNetwork();
+    const launchOptions = {
       executablePath: this.executablePath,
       headless: false,
       viewport: null,
       args: ["--start-maximized"]
-    });
+    };
+    if (network.mode === "direct") {
+      // Bypass the Windows system proxy so Xianyu sees the local ISP address.
+      launchOptions.args.push("--no-proxy-server");
+    }
+    if (network.mode === "custom") {
+      launchOptions.proxy = network.proxy;
+    }
+    const context = await chromium.launchPersistentContext(this.profileDirectory, launchOptions);
     this.context = context;
     context.on("close", () => {
       if (this.context !== context) {

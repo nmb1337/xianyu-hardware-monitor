@@ -207,6 +207,7 @@ export class MonitorDatabase {
       ["astrbot_api_key", environment.ASTRBOT_API_KEY],
       ["astrbot_bot_id", environment.ASTRBOT_BOT_ID],
       ["astrbot_receiver_qq", environment.ASTRBOT_RECEIVER_QQ],
+      ["browser_proxy", environment.XIANYU_BROWSER_PROXY],
       ["ai_base_url", environment.AI_BASE_URL],
       ["ai_api_key", environment.AI_API_KEY],
       ["ai_model", environment.AI_MODEL],
@@ -238,6 +239,7 @@ export class MonitorDatabase {
       astrbotApiKeyConfigured: Boolean(this.getSetting("astrbot_api_key")),
       astrbotBotId: this.getSetting("astrbot_bot_id") ?? "",
       astrbotReceiverQq: this.getSetting("astrbot_receiver_qq") ?? "",
+      browserProxy: this.getSetting("browser_proxy") ?? "",
       aiEnabled: this.getSetting("ai_enabled") === "1",
       aiBaseUrl: this.getSetting("ai_base_url") ?? "http://127.0.0.1:11434/v1",
       aiApiKeyConfigured: Boolean(this.getSetting("ai_api_key")),
@@ -250,6 +252,7 @@ export class MonitorDatabase {
     astrbotApiKey,
     astrbotBotId,
     astrbotReceiverQq,
+    browserProxy,
     aiEnabled,
     aiBaseUrl,
     aiApiKey,
@@ -266,6 +269,9 @@ export class MonitorDatabase {
     }
     if (typeof astrbotReceiverQq === "string") {
       this.setSetting("astrbot_receiver_qq", astrbotReceiverQq.trim());
+    }
+    if (typeof browserProxy === "string") {
+      this.setSetting("browser_proxy", browserProxy.trim());
     }
     if (typeof aiEnabled === "boolean") {
       this.setSetting("ai_enabled", aiEnabled ? "1" : "0");

@@ -34,6 +34,7 @@ test("application starts without customer service and retains monitor and review
   const html = await page.text();
   assert.match(html, /id="ai-settings-form"/);
   assert.match(html, /id="test-astrbot"/);
+  assert.match(html, /id="browser-network-form"/);
   assert.doesNotMatch(html, /customer-service|aiCustomer|客服|自动回复/);
 });
 
@@ -335,4 +336,34 @@ test("settings accept multiple receiver QQ numbers and reject invalid lists", as
   });
   assert.equal(rejected.status, 400);
   assert.match((await rejected.json()).error, /最多支持 10 个/);
+});
+
+test("browser network settings accept direct and proxy modes and reject malformed values", async (t) => {
+  const { services, baseUrl } = await startApplication(t);
+  const save = async (browserProxy) => {
+    const response = await fetch(`${baseUrl}/api/settings`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ browserProxy })
+    });
+    return { status: response.status, body: await response.json() };
+  };
+
+  assert.equal((await save("direct")).status, 200);
+  assert.equal(services.database.getSetting("browser_proxy"), "direct");
+  assert.equal(services.database.getPublicSettings().browserProxy, "direct");
+  assert.equal(services.browser.status().network, "直连（不使用代理）");
+
+  assert.equal((await save("socks5://127.0.0.1:1080")).status, 200);
+  assert.equal(services.database.getSetting("browser_proxy"), "socks5://127.0.0.1:1080");
+
+  // Empty string resets to the Windows system proxy.
+  assert.equal((await save("")).status, 200);
+  assert.equal(services.database.getSetting("browser_proxy"), "");
+  assert.equal(services.browser.status().network, "跟随系统代理");
+
+  const invalid = await save("http://127.0.0.1");
+  assert.equal(invalid.status, 400);
+  assert.match(invalid.body.error, /端口/);
+  assert.equal(services.database.getSetting("browser_proxy"), "");
 });
