@@ -124,9 +124,10 @@ const searchPayload = {
   } } } } }] }
 };
 
-async function scanFixture(t, { payload = searchPayload, status = 200 } = {}) {
+async function scanFixture(t, { payload = searchPayload, status = 200, searchBox = false } = {}) {
   const result = await fixture(t, {
     html: `<body>
+      ${searchBox ? '<input id="search-input" placeholder="\u641c\u7d22\u4f60\u60f3\u8981\u7684\u5b9d\u8d1d">' : ""}
       <span hidden>\u65b0\u53d1\u5e03</span>
       <button onclick="document.querySelector('#latest').hidden=false">\u65b0\u53d1\u5e03</button>
       <span hidden>\u6700\u65b0</span>
@@ -139,6 +140,15 @@ async function scanFixture(t, { payload = searchPayload, status = 200 } = {}) {
   result.page.waitForTimeout = async () => {};
   return result;
 }
+
+browserTest("scans type the keyword into the site search box instead of opening the URL", async (t) => {
+  const { browser, page } = await scanFixture(t, { searchBox: true });
+  const listings = await browser.scan({ keyword: "gpu" });
+  assert.equal(listings.length, 1);
+  assert.equal(listings[0].itemId, "fixture-gpu");
+  assert.equal(await page.locator("#search-input").inputValue(), "gpu");
+  assert.equal(browser.status().state, "verified");
+});
 
 browserTest("a successful scan clicks visible sort options and parses the response", async (t) => {
   const { browser } = await scanFixture(t);

@@ -7,6 +7,10 @@ const SEARCH_URL = "https://www.goofish.com/search?q=";
 const LOGIN_COOKIE_NAMES = new Set(["tracknick", "unb", "lgc"]);
 const SEARCH_RESPONSE_MARKER = "mtop.taobao.idlemtopsearch.pc.search";
 const VERIFICATION_MASK_SELECTOR = ".baxia-dialog-mask";
+
+function randomBetween(minimum, maximum) {
+  return minimum + Math.floor(Math.random() * (maximum - minimum + 1));
+}
 const DEFAULT_BROWSER_PATHS = [
   "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
   "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
@@ -311,7 +315,8 @@ export class XianyuBrowser {
       executablePath: this.executablePath,
       headless: false,
       viewport: null,
-      args: ["--start-maximized"]
+      // Keep Chromium's automation marker off so the browser reports itself like a normal one.
+      args: ["--start-maximized", "--disable-blink-features=AutomationControlled"]
     };
     if (network.mode === "direct") {
       // Bypass the Windows system proxy so Xianyu sees the local ISP address.
@@ -448,6 +453,73 @@ export class XianyuBrowser {
     if (access) {
       await this.#requireAccessCheck(access);
     }
+  }
+
+  async #humanPause(minimum, maximum) {
+    await this.page.waitForTimeout(randomBetween(minimum, maximum));
+  }
+
+  // Enter the search the way a person does: type into the visible search box and press
+  // Enter. Only when no usable box exists fall back to opening the search URL directly.
+  async #openSearch(keyword) {
+    if (!isXianyuUrl(this.page.url())) {
+      await this.page.goto("https://www.goofish.com/", { waitUntil: "domcontentloaded", timeout: 60_000 });
+      await this.#humanPause(1_200, 2_400);
+    }
+    const box = await this.#findSearchBox();
+    if (box) {
+      try {
+        await box.click({ timeout: 5_000 });
+        await this.#humanPause(120, 420);
+        await this.page.keyboard.press("Control+a");
+        await this.page.keyboard.press("Backspace");
+        await this.#humanPause(80, 260);
+        await box.pressSequentially(keyword, { delay: randomBetween(60, 170) });
+        await this.#humanPause(150, 500);
+        await this.page.keyboard.press("Enter");
+        await this.page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => {});
+        await this.#humanPause(2_600, 4_600);
+        return true;
+      } catch (error) {
+        if (isClosedTargetError(error)) {
+          throw error;
+        }
+        // The box was unusable (hidden overlay, detached frame, ...): fall back below.
+      }
+    }
+    await this.page.goto(`${SEARCH_URL}${encodeURIComponent(keyword)}`, {
+      waitUntil: "domcontentloaded",
+      timeout: 60_000
+    });
+    await this.#humanPause(2_600, 4_600);
+    return false;
+  }
+
+  async #findSearchBox() {
+    for (const selector of ['input[placeholder*="搜索"]', 'input[type="search"]', 'input[aria-label*="搜索"]']) {
+      try {
+        const box = this.page.locator(selector).filter({ visible: true }).first();
+        if (await box.count()) {
+          return box;
+        }
+      } catch (error) {
+        if (isClosedTargetError(error)) {
+          throw error;
+        }
+      }
+    }
+    return null;
+  }
+
+  // A person glances through the result list before choosing a sort order.
+  async #browseResults() {
+    const steps = randomBetween(2, 4);
+    for (let index = 0; index < steps; index += 1) {
+      await this.page.mouse.wheel(0, randomBetween(320, 780)).catch(() => {});
+      await this.#humanPause(140, 420);
+    }
+    await this.page.mouse.wheel(0, -randomBetween(200, 500)).catch(() => {});
+    await this.#humanPause(150, 450);
   }
 
   async #clickSortOption(text) {
@@ -646,16 +718,17 @@ export class XianyuBrowser {
       }
 
       await this.#checkForManualVerification();
-      const url = `${SEARCH_URL}${encodeURIComponent(rule.keyword)}`;
-      await this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
-      await this.page.waitForTimeout(3_500);
+      await this.#openSearch(rule.keyword);
 
+      await this.#checkForManualVerification();
+      await this.#browseResults();
       await this.#checkForManualVerification();
 
       await this.#clickSortOption("新发布");
-      await this.page.waitForTimeout(600);
+      await this.#humanPause(400, 1_200);
       await this.#checkForManualVerification();
 
+      await this.#humanPause(250, 800);
       let response;
       try {
         response = await this.#readLatestResponse();
