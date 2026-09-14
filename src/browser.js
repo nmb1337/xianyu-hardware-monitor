@@ -1,24 +1,45 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { URL } from "node:url";
-import { resolve } from "node:path";
+import { resolve, win32 } from "node:path";
 import { parsePrice } from "./filter.js";
-import { MINIMUM_SEARCH_GAP_MS } from "./pacing.js";
 
 const SEARCH_URL = "https://www.goofish.com/search?q=";
 const LOGIN_COOKIE_NAMES = new Set(["tracknick", "unb", "lgc"]);
 const SEARCH_RESPONSE_MARKER = "mtop.taobao.idlemtopsearch.pc.search";
 const VERIFICATION_MASK_SELECTOR = ".baxia-dialog-mask";
+const DEFAULT_BROWSER_PATHS = [
+  "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+  "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+  "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+  "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"
+];
 
-function chromeExecutable() {
-  const candidates = [
-    process.env.XIANYU_BROWSER_PATH,
-    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-    "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"
-  ].filter(Boolean);
+function browserNameForExecutable(executablePath) {
+  const executableName = win32.basename(executablePath ?? "").toLowerCase();
+  if (!executablePath) {
+    return "";
+  }
+  if (executableName === "msedge.exe" || executableName === "msedge") {
+    return "Microsoft Edge";
+  }
+  return /^chrome(?:\.exe)?$/.test(executableName) ? "Google Chrome" : "Chromium";
+}
 
-  return candidates.find((path) => existsSync(path)) ?? null;
+function sameExecutable(left, right) {
+  return Boolean(left && right)
+    && win32.normalize(left).toLowerCase() === win32.normalize(right).toLowerCase();
+}
+
+function browserExecutable() {
+  const configuredPath = process.env.XIANYU_BROWSER_PATH?.trim();
+  if (configuredPath) {
+    return existsSync(configuredPath) ? configuredPath : null;
+  }
+  return DEFAULT_BROWSER_PATHS.find((path) => existsSync(path)) ?? null;
+}
+
+function alternateBrowserExecutable(currentPath) {
+  return DEFAULT_BROWSER_PATHS.find((path) => existsSync(path) && !sameExecutable(path, currentPath)) ?? null;
 }
 
 function normalizeUrl(value) {
@@ -157,22 +178,33 @@ export function isVerificationOverlayError(error) {
 }
 
 export class XianyuBrowser {
-  constructor({ dataDirectory }) {
-    this.profileDirectory = resolve(dataDirectory, "chrome-profile");
-    this.executablePath = chromeExecutable();
+  constructor({
+    dataDirectory,
+    executablePath = browserExecutable(),
+    alternateExecutablePath = alternateBrowserExecutable(executablePath)
+  }) {
+    this.dataDirectory = resolve(dataDirectory);
+    this.executablePath = executablePath;
+    this.alternateExecutablePath = alternateExecutablePath;
+    this.browserName = browserNameForExecutable(executablePath);
+    // Keep each browser's persistent login data separate; never migrate cookies.
+    this.profileDirectory = resolve(this.dataDirectory,
+      this.browserName === "Microsoft Edge" ? "edge-profile" : "chrome-profile");
     this.context = null;
     this.page = null;
     this.playwright = null;
     this.loginState = "not_started";
     this.message = "";
     this.operation = Promise.resolve();
-    this.lastSearchStartedAt = 0;
   }
 
   status() {
     return {
       available: Boolean(this.executablePath),
       executablePath: this.executablePath ?? "",
+      browserName: this.browserName,
+      canSwitch: Boolean(this.alternateExecutablePath),
+      alternateBrowserName: browserNameForExecutable(this.alternateExecutablePath),
       state: this.loginState,
       message: this.message,
       browserOpen: Boolean(this.context)
@@ -213,18 +245,21 @@ export class XianyuBrowser {
 
     const chromium = await this.#loadPlaywright();
     mkdirSync(this.profileDirectory, { recursive: true });
-    this.context = await chromium.launchPersistentContext(this.profileDirectory, {
+    const context = await chromium.launchPersistentContext(this.profileDirectory, {
       executablePath: this.executablePath,
       headless: false,
       viewport: null,
       args: ["--start-maximized"]
     });
-    this.context.on("close", () => {
+    this.context = context;
+    context.on("close", () => {
+      if (this.context !== context) {
+        return;
+      }
       this.context = null;
       this.page = null;
-      if (this.loginState !== "verified") {
-        this.loginState = "not_started";
-      }
+      this.loginState = "not_started";
+      this.message = "浏览器已关闭。";
     });
     this.page = this.context.pages().find((page) => isXianyuUrl(page.url()) || accessKindFromUrl(page.url()))
       ?? this.context.pages()[0]
@@ -234,10 +269,18 @@ export class XianyuBrowser {
 
   async #discardContext() {
     const context = this.context;
-    this.context = null;
-    this.page = null;
     if (context) {
-      await context.close().catch(() => {});
+      try {
+        await context.close();
+      } catch (error) {
+        if (!isClosedTargetError(error)) {
+          throw error;
+        }
+      }
+    }
+    if (this.context === context) {
+      this.context = null;
+      this.page = null;
     }
   }
 
@@ -320,8 +363,8 @@ export class XianyuBrowser {
     this.page = page;
     this.loginState = kind === "login" ? "waiting_for_login" : "waiting_for_verification";
     this.message = kind === "login"
-      ? "闲鱼登录已失效，请在浏览器窗口中完成登录后再恢复扫描。"
-      : "闲鱼要求访问验证，请在浏览器窗口中人工完成后再恢复扫描。";
+      ? "闲鱼登录已失效，请在浏览器窗口中完成登录，程序会自动继续查询。"
+      : "闲鱼要求访问验证，请在浏览器窗口中完成验证，程序会自动继续查询。";
     await page.bringToFront().catch(() => {});
   }
 
@@ -334,14 +377,6 @@ export class XianyuBrowser {
     const access = await this.#findAccessBlock();
     if (access) {
       await this.#requireAccessCheck(access);
-    }
-  }
-
-  async #waitForSearchSlot() {
-    const waitMilliseconds = this.lastSearchStartedAt + MINIMUM_SEARCH_GAP_MS - Date.now();
-    if (waitMilliseconds > 0) {
-      this.message = `访问频率保护：将在 ${Math.ceil(waitMilliseconds / 1_000)} 秒后执行下一次搜索。`;
-      await this.page.waitForTimeout(waitMilliseconds);
     }
   }
 
@@ -436,8 +471,13 @@ export class XianyuBrowser {
     });
   }
 
-  async verifyLogin() {
+  async verifyLogin({ openIfNeeded = true } = {}) {
     return this.#withOperation(async () => {
+      if (!openIfNeeded && (!this.context || !this.page || this.page.isClosed())) {
+        this.loginState = "waiting_for_login";
+        this.message = "闲鱼登录窗口已关闭，未确认有效登录。";
+        return this.status();
+      }
       await this.#ensureContext();
       const access = await this.#findAccessBlock();
       if (access) {
@@ -464,7 +504,7 @@ export class XianyuBrowser {
         this.message = "未检测到有效闲鱼登录页面，请在浏览器中完成登录或验证。";
       }
       return this.status();
-    });
+    }, { retryClosed: openIfNeeded });
   }
 
   async close() {
@@ -473,7 +513,28 @@ export class XianyuBrowser {
       this.loginState = "not_started";
       this.message = "浏览器已关闭。";
       return this.status();
-    });
+    }, { retryClosed: false });
+  }
+
+  async switchBrowser() {
+    return this.#withOperation(async () => {
+      const nextExecutablePath = this.alternateExecutablePath;
+      if (!nextExecutablePath) {
+        throw new Error("未找到可切换的备用浏览器，请安装 Chrome 或 Edge。");
+      }
+      const previousExecutablePath = this.executablePath;
+      await this.#discardContext();
+      this.executablePath = nextExecutablePath;
+      this.alternateExecutablePath = previousExecutablePath && existsSync(previousExecutablePath)
+        ? previousExecutablePath
+        : alternateBrowserExecutable(nextExecutablePath);
+      this.browserName = browserNameForExecutable(this.executablePath);
+      this.profileDirectory = resolve(this.dataDirectory,
+        this.browserName === "Microsoft Edge" ? "edge-profile" : "chrome-profile");
+      this.loginState = "not_started";
+      this.message = `已切换到 ${this.browserName}，等待打开登录窗口。`;
+      return this.status();
+    }, { retryClosed: false });
   }
 
   async scan(rule) {
@@ -493,10 +554,8 @@ export class XianyuBrowser {
         throw new Error(this.message);
       }
 
-      await this.#waitForSearchSlot();
       await this.#checkForManualVerification();
       const url = `${SEARCH_URL}${encodeURIComponent(rule.keyword)}`;
-      this.lastSearchStartedAt = Date.now();
       await this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
       await this.page.waitForTimeout(3_500);
 

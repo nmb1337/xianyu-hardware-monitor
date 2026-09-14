@@ -9,7 +9,6 @@ import { AstrBotNotifier, normalizeAstrBotBaseUrl } from "./astrbot.js";
 import { AiReviewer, normalizeAiBaseUrl } from "./ai.js";
 import { XianyuBrowser } from "./browser.js";
 import { MonitorService } from "./monitor.js";
-import { MINIMUM_RULE_INTERVAL_SECONDS } from "./pacing.js";
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const rootDirectory = resolve(sourceDirectory, "..");
@@ -90,7 +89,6 @@ function cleanRule(input, current = {}) {
   const maximum = Number(source.maxPriceCny ?? source.priceCeilingCny);
   const hasMinimum = source.minPriceCny !== null && source.minPriceCny !== undefined && source.minPriceCny !== "";
   const minimum = hasMinimum ? Number(source.minPriceCny) : null;
-  const interval = Number(source.scanIntervalSeconds);
   const category = String(source.category ?? "").trim();
 
   if (!categoryNames.has(category)) {
@@ -102,9 +100,6 @@ function cleanRule(input, current = {}) {
   if (minimum !== null && (!Number.isFinite(minimum) || minimum < 0 || minimum >= maximum)) {
     throw new Error("最低价必须大于等于 0 且小于最高价");
   }
-  if (!Number.isInteger(interval) || interval < MINIMUM_RULE_INTERVAL_SECONDS || interval > 86_400) {
-    throw new Error(`扫描间隔必须为 ${MINIMUM_RULE_INTERVAL_SECONDS} 到 86400 秒之间的整数`);
-  }
 
   return {
     name: cleanText(source.name, "规则名称", 80),
@@ -115,8 +110,7 @@ function cleanRule(input, current = {}) {
     minPriceCny: minimum,
     maxPriceCny: maximum,
     personalOnly: Boolean(source.personalOnly),
-    enabled: source.enabled !== false,
-    scanIntervalSeconds: interval
+    enabled: source.enabled !== false
   };
 }
 
@@ -199,10 +193,21 @@ async function routeApi(request, response, url, services) {
   if (method === "GET" && path === "/api/blocked-listings") {
     return sendJson(response, 200, database.listBlockedListings(url.searchParams.get("limit")));
   }
+  if (method === "GET" && path === "/api/ai-rejections") {
+    return sendJson(response, 200, database.listAiRejections(url.searchParams.get("limit")));
+  }
+  const aiRestoreMatch = path.match(/^\/api\/ai-rejections\/([^/]+)\/restore$/);
+  if (aiRestoreMatch && method === "POST") {
+    const itemId = decodeURIComponent(aiRestoreMatch[1]);
+    return database.restoreAiRejectedItem(itemId)
+      ? sendNoContent(response)
+      : sendJson(response, 404, { error: "未找到 AI 审核记录" });
+  }
   if (method === "POST" && path === "/api/blocked-listings") {
     const body = await readJson(request);
     const itemId = cleanText(body.itemId, "商品 ID", 200);
-    const title = cleanText(body.title, "商品标题", 500);
+    // Search titles may contain full descriptions; readJson still bounds the total request size.
+    const title = cleanText(body.title, "商品标题", Infinity);
     const listingUrl = cleanText(body.url, "商品链接", 1_000);
     if (!/^https?:\/\//i.test(listingUrl)) {
       throw new Error("商品链接格式无效");
@@ -253,7 +258,7 @@ async function routeApi(request, response, url, services) {
     if (aiModel.length > 120) {
       throw new Error("AI 模型名称不能超过 120 个字符");
     }
-    return sendJson(response, 200, database.updateSettings({
+    const settings = database.updateSettings({
       astrbotBaseUrl: normalizeAstrBotBaseUrl(body.astrbotBaseUrl ?? currentSettings.astrbotBaseUrl),
       astrbotApiKey: body.astrbotApiKey,
       astrbotBotId: botId,
@@ -262,7 +267,11 @@ async function routeApi(request, response, url, services) {
       aiBaseUrl: aiBaseUrl || undefined,
       aiApiKey: body.aiApiKey,
       aiModel: aiModel || undefined
-    }));
+    });
+    if (body.aiEnabled === false) {
+      services.ai.cancelPending();
+    }
+    return sendJson(response, 200, settings);
   }
   if (method === "POST" && path === "/api/settings/test-astrbot") {
     await notifier.sendMessage("闲鱼硬件监控：AstrBot + NapCat QQ 提醒测试成功。");
@@ -299,13 +308,19 @@ async function routeApi(request, response, url, services) {
     return sendJson(response, 200, browser.status());
   }
   if (method === "POST" && path === "/api/browser/login") {
-    return sendJson(response, 200, await browser.openLogin());
+    return sendJson(response, 200, await monitor.openLogin());
+  }
+  if (method === "POST" && path === "/api/browser/restart-login") {
+    return sendJson(response, 200, await monitor.restartLogin());
+  }
+  if (method === "POST" && path === "/api/browser/switch") {
+    return sendJson(response, 200, await monitor.switchBrowser());
   }
   if (method === "POST" && path === "/api/browser/verify") {
-    return sendJson(response, 200, await browser.verifyLogin());
+    return sendJson(response, 200, await monitor.verifyLogin());
   }
   if (method === "POST" && path === "/api/browser/close") {
-    return sendJson(response, 200, await browser.close());
+    return sendJson(response, 200, await monitor.closeBrowser());
   }
 
   sendJson(response, 404, { error: "未找到 API" });

@@ -308,6 +308,28 @@ table {
   min-width: 900px;
 }
 
+.ai-rejections-section table {
+  min-width: 780px;
+  table-layout: fixed;
+}
+
+.ai-rejections-section th:nth-child(1) {
+  width: 23%;
+}
+
+.ai-rejections-section th:nth-child(3) {
+  width: 31%;
+}
+
+.ai-rejections-section td,
+.blocked-section td {
+  overflow-wrap: anywhere;
+}
+
+#access-recovery {
+  overflow-wrap: anywhere;
+}
+
 th,
 td {
   border-bottom: 1px solid #e2e7ed;
@@ -525,5 +547,62 @@ a:hover {
 
   .section-browser .section-heading {
     flex-direction: column;
+  }
+
+  .ai-rejections-section table {
+    min-width: 0;
+    table-layout: auto;
+  }
+
+  .ai-rejections-section thead {
+    display: none;
+  }
+
+  .ai-rejections-section tbody {
+    display: block;
+  }
+
+  .ai-rejections-section tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px 12px;
+    padding: 12px;
+    border-bottom: 1px solid #e2e7ed;
+  }
+
+  .ai-rejections-section tr:last-child {
+    border-bottom: 0;
+  }
+
+  .ai-rejections-section td {
+    display: block;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+  }
+
+  .ai-rejections-section .ai-reason {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .ai-rejections-section td:nth-child(4) {
+    grid-row: 3;
+  }
+
+  .ai-rejections-section td:nth-child(5) {
+    grid-column: 1 / -1;
+    grid-row: 4;
+    color: #6a7890;
+    font-size: 12px;
+  }
+
+  .ai-rejections-section td:nth-child(6) {
+    grid-column: 2;
+    grid-row: 3;
+  }
+
+  .ai-rejections-section .empty {
+    grid-column: 1 / -1;
   }
 }

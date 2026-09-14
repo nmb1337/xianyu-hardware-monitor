@@ -3,8 +3,13 @@ const state = {
   rules: [],
   listings: [],
   blockedListings: [],
+  aiRejections: [],
   status: null,
-  editingRuleId: null
+  editingRuleId: null,
+  aiEnabled: false,
+  aiSettingsDirty: false,
+  aiSettingsRevision: 0,
+  savingAiSettings: false
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -73,6 +78,7 @@ function toast(message, error = false) {
 
 function setButtonLoading(button, active) {
   button.disabled = active;
+  button.dataset.loading = String(active);
   button.dataset.originalText ||= button.textContent;
   button.textContent = active ? "处理中..." : button.dataset.originalText;
 }
@@ -86,6 +92,7 @@ function renderStatus(status) {
   $("#stop-monitor").disabled = !status.running;
 
   const browser = status.browser;
+  $("#browser-name").textContent = browser.browserName || "浏览器";
   $("#browser-state").textContent = browser.available
     ? ({ verified: "已登录", waiting_for_login: "等待登录", waiting_for_verification: "等待验证" }[browser.state] ?? "未连接")
     : "未找到浏览器";
@@ -96,44 +103,51 @@ function renderStatus(status) {
     : "填写 AstrBot 地址、IM API Key、机器人 ID 和接收 QQ";
   $("#activity-state").textContent = status.accessPaused
     ? "已暂停"
-    : status.quietHoursActive
-      ? "夜间静默"
     : status.activeRuleId
       ? "扫描中"
       : status.running
         ? "待扫描"
         : "已停止";
   $("#activity-message").textContent = status.lastActivity || "-";
-  const nextSearch = `搜索时段：${formatTime(status.nextSearchAt)}`;
+  const nextRule = status.nextRuleName ? `下一条：${status.nextRuleName}` : "暂无已启用规则";
   $("#search-schedule").textContent = status.accessPaused
-    ? "搜索计划已暂停，等待人工确认"
-    : status.quietHoursActive
-      ? "夜间静默：00:00-08:00 不搜索"
+    ? "自动查询已暂停，正在等待登录恢复"
     : !status.running
-      ? `自动搜索未启动；${nextSearch}`
-      : nextSearch;
+      ? `自动查询未启动；启动后按规则顺序连续查询（${nextRule}）`
+      : `按规则顺序连续查询（${status.enabledRuleCount ?? 0} 条）；${nextRule}`;
   const resumeButton = $("#resume-monitor");
-  resumeButton.disabled = !status.accessPaused;
+  const recoveryBusy = ["closing", "opening"].includes(status.recoveryState);
+  resumeButton.disabled = !status.accessPaused || recoveryBusy || resumeButton.dataset.loading === "true";
   resumeButton.title = status.accessPaused
-    ? "人工完成登录或验证后再点这里，不会立刻连续扫描"
+    ? "若程序还没有自动恢复，可人工完成登录或验证后点这里立即继续"
     : "当前没有因登录或验证暂停";
+  $("#restart-login").disabled = !browser.available || Boolean(status.activeRuleId)
+    || $("#restart-login").dataset.loading === "true";
+  const switchButton = $("#switch-browser");
+  switchButton.disabled = !browser.canSwitch || Boolean(status.activeRuleId)
+    || switchButton.dataset.loading === "true";
+  switchButton.title = browser.canSwitch
+    ? `遇到验证时会自动切换到 ${browser.alternateBrowserName}；也可手动切换`
+    : "未找到可用的备用浏览器";
+  $("#access-recovery").textContent = status.accessPaused ? status.lastActivity
+    : browser.state === "verified" ? "会话已验证，无待处理恢复任务"
+      : browser.message || "尚未验证闲鱼会话";
+  $("#search-frequency").textContent = "按规则顺序连续查询，不设间隔、次数上限与夜间静默";
 }
 
 function renderRules(rules) {
   state.rules = rules;
-  const scanWaiting = Boolean(
-    state.status?.accessPaused || state.status?.activeRuleId
-    || !state.status?.nextSearchAt || state.status.nextSearchAt > Date.now()
-  );
+  const enabledRules = rules
+    .filter((rule) => rule.enabled)
+    .sort((left, right) => left.id - right.id);
+  const scanWaiting = Boolean(state.status?.accessPaused || state.status?.activeRuleId);
   const scanTitle = state.status?.accessPaused
-    ? "请先在闲鱼浏览器中人工完成验证或登录"
-    : "全局低频保护期间不能提前搜索";
-  const enabledCount = rules.filter((rule) => rule.enabled).length;
+    ? "登录或验证暂停期间无法扫描；恢复后会自动继续"
+    : "当前正在扫描其他规则";
+  const enabledCount = enabledRules.length;
   $("#rule-count").textContent = `${rules.length} 条规则，${enabledCount} 条启用`;
-  const minHours = (state.status?.searchIntervalMinMs ?? 5_400_000) * enabledCount / 3_600_000;
-  const maxHours = (state.status?.searchIntervalMaxMs ?? 7_200_000) * enabledCount / 3_600_000;
   $("#rotation-estimate").textContent = enabledCount
-    ? `预计一轮 ${minHours}-${maxHours} 小时（不含暂停及更长的规则间隔）`
+    ? `将按顺序连续查询 ${enabledCount} 条启用规则，循环执行`
     : "暂无已启用规则";
   const body = $("#rules-body");
   if (!rules.length) {
@@ -143,6 +157,8 @@ function renderRules(rules) {
 
   body.innerHTML = rules
     .map((rule) => {
+      const waiting = scanWaiting;
+      const order = enabledRules.findIndex((candidate) => candidate.id === rule.id);
       const filters = [
         rule.personalOnly ? "个人" : "不限卖家",
         rule.includeTerms.length ? `含 ${rule.includeTerms.join(" / ")}` : "",
@@ -153,14 +169,14 @@ function renderRules(rules) {
       return `
         <tr>
           <td><strong>${escapeHtml(rule.name)}</strong><small>${escapeHtml(categoryLabel(rule.category))}</small></td>
-          <td>${escapeHtml(rule.keyword)}<small>规则间隔下限 ${rule.scanIntervalSeconds} 秒</small></td>
+          <td>${escapeHtml(rule.keyword)}${order >= 0 ? `<small>按顺序第 ${order + 1} 位</small>` : ""}</td>
           <td>${formatPriceRange(rule.minPriceCny, rule.maxPriceCny)}</td>
           <td>${escapeHtml(filters || "-")}</td>
           <td><span class="tag ${rule.enabled ? "on" : "off"}">${rule.enabled ? "已启用" : "已停用"}</span></td>
           <td>${rule.lastError ? `<small class="error-text">${escapeHtml(rule.lastError)}</small>` : `<small>${rule.lastScannedAt ? formatTime(rule.lastScannedAt) : "未扫描"}</small>`}</td>
           <td>
             <div class="row-actions">
-              <button class="button" data-action="scan" data-id="${rule.id}" ${scanWaiting ? "disabled" : ""} title="${scanWaiting ? scanTitle : "使用当前全局搜索时段"}">扫描</button>
+              <button class="button" data-action="scan" data-id="${rule.id}" ${waiting ? "disabled" : ""} title="${waiting ? scanTitle : "立即扫描这条规则"}">扫描</button>
               <button class="button" data-action="edit" data-id="${rule.id}">编辑</button>
               <button class="button" data-action="toggle" data-id="${rule.id}">${rule.enabled ? "停用" : "启用"}</button>
               <button class="button" data-action="delete" data-id="${rule.id}">删除</button>
@@ -228,6 +244,31 @@ function renderBlockedListings(listings) {
     .join("");
 }
 
+function renderAiRejections(rejections) {
+  state.aiRejections = rejections;
+  $("#ai-rejection-count").textContent = `最近 ${rejections.length} 条审核记录`;
+  $("#ai-rejections-body").innerHTML = rejections.length
+    ? rejections.map((review) => {
+      const action = review.isBlocked ? "已屏蔽" : review.blocked ? "已解除屏蔽" : "仅过滤提醒";
+      return `
+        <tr>
+          <td><strong>${escapeHtml(review.title)}</strong><small>${escapeHtml(review.ruleName)} | ${escapeHtml(review.sellerName || "卖家未知")}</small></td>
+          <td>${formatCurrency(review.price)}</td>
+          <td class="ai-reason">${escapeHtml(review.reason)}${review.evidence ? `<small>原文依据：${escapeHtml(review.evidence)}</small>` : ""}</td>
+          <td><span class="tag ${review.isBlocked ? "blocked" : "pending"}">${action}</span><small><button
+            class="button"
+            data-action="restore-ai"
+            data-item-id="${escapeHtml(review.itemId)}"
+            title="删除这条审核结果；下次扫描重新按规则判断并提醒，AI 不会再自动过滤或屏蔽它"
+          >恢复提醒</button></small></td>
+          <td>${formatTime(review.reviewedAt)}</td>
+          <td><a href="${escapeHtml(review.url)}" target="_blank" rel="noreferrer">打开商品</a></td>
+        </tr>
+      `;
+    }).join("")
+    : '<tr><td class="empty" colspan="6">暂无 AI 未通过记录。</td></tr>';
+}
+
 function renderNotifications(notifications) {
   const element = $("#notifications");
   if (!notifications.length) {
@@ -249,13 +290,15 @@ function renderNotifications(notifications) {
 }
 
 async function refresh() {
-  const [status, rules, listings, blockedListings, notifications, settings] = await Promise.all([
+  const aiRevision = state.aiSettingsRevision;
+  const [status, rules, listings, blockedListings, notifications, settings, aiRejections] = await Promise.all([
     request("/api/status"),
     request("/api/rules"),
     request("/api/listings?limit=100"),
     request("/api/blocked-listings?limit=100"),
     request("/api/notifications?limit=100"),
-    request("/api/settings")
+    request("/api/settings"),
+    request("/api/ai-rejections?limit=100")
   ]);
   renderStatus(status);
   renderRules(rules);
@@ -263,6 +306,7 @@ async function refresh() {
   state.blockedListings = blockedListings;
   renderBlockedListings(blockedListings);
   renderNotifications(notifications);
+  renderAiRejections(aiRejections);
   if (document.activeElement !== $("#astrbot-base-url")) {
     $("#astrbot-base-url").value = settings.astrbotBaseUrl || "http://127.0.0.1:6185";
   }
@@ -272,13 +316,14 @@ async function refresh() {
   if (document.activeElement !== $("#astrbot-qq")) {
     $("#astrbot-qq").value = settings.astrbotReceiverQq || "";
   }
-  if (document.activeElement !== $("#ai-base-url")) {
-    $("#ai-base-url").value = settings.aiBaseUrl || "http://127.0.0.1:11434/v1";
+  // An older poll must not overwrite a toggle or an unsaved settings draft.
+  if (aiRevision === state.aiSettingsRevision && !state.savingAiSettings) {
+    renderAiEnabled(settings.aiEnabled === true);
+    if (!state.aiSettingsDirty) {
+      $("#ai-base-url").value = settings.aiBaseUrl || "http://127.0.0.1:11434/v1";
+      $("#ai-model").value = settings.aiModel || "qwen2.5:7b";
+    }
   }
-  if (document.activeElement !== $("#ai-model")) {
-    $("#ai-model").value = settings.aiModel || "qwen2.5:7b";
-  }
-  $("#ai-enabled").checked = settings.aiEnabled === true;
   $("#ai-api-key").placeholder = settings.aiApiKeyConfigured
     ? "已保存 Key；留空则保持不变"
     : "本地模型可留空";
@@ -287,13 +332,54 @@ async function refresh() {
     : "AstrBot IM API Key";
 }
 
+function renderAiEnabled(enabled) {
+  state.aiEnabled = enabled;
+  $("#ai-enabled").checked = enabled;
+  $("#ai-review-state").textContent = enabled ? "已启用" : "未启用";
+  $("#ai-review-state").classList.toggle("on", enabled);
+}
+
+async function saveAiSettings(values, { saveDraft = false } = {}) {
+  if (state.savingAiSettings) {
+    return;
+  }
+  const revision = ++state.aiSettingsRevision;
+  state.savingAiSettings = true;
+  const button = $("#ai-settings-form button[type='submit']");
+  $("#ai-enabled").disabled = true;
+  setButtonLoading(button, true);
+  try {
+    const settings = await request("/api/settings", { method: "PUT", body: JSON.stringify(values) });
+    if (saveDraft) {
+      if (revision === state.aiSettingsRevision) {
+        state.aiSettingsDirty = false;
+      }
+      if ($("#ai-api-key").value === values.aiApiKey) {
+        $("#ai-api-key").value = "";
+      }
+    }
+    renderAiEnabled(settings.aiEnabled === true);
+    toast(saveDraft ? "AI 设置已保存。" : settings.aiEnabled ? "AI 审核已启用。" : "AI 审核已关闭。");
+  } catch (error) {
+    renderAiEnabled(state.aiEnabled);
+    toast(error.message || "AI 设置保存失败", true);
+  } finally {
+    state.aiSettingsRevision += 1;
+    state.savingAiSettings = false;
+    $("#ai-enabled").disabled = false;
+    setButtonLoading(button, false);
+    await refresh().catch(() => {});
+  }
+}
+
 async function withAction(button, callback) {
   setButtonLoading(button, true);
   try {
     await callback();
     await refresh();
   } catch (error) {
-    toast(error.message || "操作失败", true);
+    toast(error.message || "操作失败", error.message !== "AI 请求已取消");
+    await refresh().catch(() => {});
   } finally {
     setButtonLoading(button, false);
     if (state.status) {
@@ -319,7 +405,6 @@ async function bootstrap() {
       keyword: form.get("keyword"),
       minPriceCny: form.get("minPriceCny"),
       maxPriceCny: form.get("maxPriceCny"),
-      scanIntervalSeconds: form.get("scanIntervalSeconds"),
       includeTerms: form.get("includeTerms"),
       excludeTerms: form.get("excludeTerms"),
       personalOnly: form.get("personalOnly") === "on",
@@ -338,7 +423,6 @@ async function bootstrap() {
       }
       formElement.reset();
       formElement.querySelector('[name="minPriceCny"]').value = "0";
-      formElement.querySelector('[name="scanIntervalSeconds"]').value = "300";
       formElement.querySelector('[name="personalOnly"]').checked = true;
       formElement.querySelector('[name="enabled"]').checked = true;
       state.editingRuleId = null;
@@ -377,7 +461,6 @@ async function bootstrap() {
         formElement.elements.keyword.value = rule.keyword;
         formElement.elements.minPriceCny.value = rule.minPriceCny ?? 0;
         formElement.elements.maxPriceCny.value = rule.maxPriceCny;
-        formElement.elements.scanIntervalSeconds.value = rule.scanIntervalSeconds;
         formElement.elements.includeTerms.value = rule.includeTerms.join(", ");
         formElement.elements.excludeTerms.value = rule.excludeTerms.join(", ");
         formElement.elements.personalOnly.checked = rule.personalOnly;
@@ -439,7 +522,25 @@ async function bootstrap() {
       await request(`/api/blocked-listings/${encodeURIComponent(button.dataset.itemId)}`, {
         method: "DELETE"
       });
-      toast("商品已恢复监控。");
+      toast("商品已恢复监控；AI 不会再自动过滤或屏蔽它。");
+    });
+  });
+
+  $("#ai-rejections-body").addEventListener("click", async (event) => {
+    const button = event.target.closest('button[data-action="restore-ai"]');
+    if (!button) {
+      return;
+    }
+    const row = button.closest("tr");
+    const title = row?.querySelector("strong")?.textContent || "这个商品";
+    if (!confirm(`恢复“${title}”的提醒？删除这条审核结果后，下次扫描会重新按规则判断并提醒。`)) {
+      return;
+    }
+    await withAction(button, async () => {
+      await request(`/api/ai-rejections/${encodeURIComponent(button.dataset.itemId)}/restore`, {
+        method: "POST"
+      });
+      toast("已恢复提醒；下次扫描会重新按规则提醒。");
     });
   });
 
@@ -462,23 +563,24 @@ async function bootstrap() {
     });
   });
 
+  $("#ai-settings-form").addEventListener("input", (event) => {
+    if (event.target.id !== "ai-enabled") {
+      state.aiSettingsDirty = true;
+      state.aiSettingsRevision += 1;
+    }
+  });
+  $("#ai-enabled").addEventListener("change", (event) =>
+    saveAiSettings({ aiEnabled: event.target.checked })
+  );
   $("#ai-settings-form").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const button = event.submitter;
     const form = new FormData(event.currentTarget);
-    await withAction(button, async () => {
-      await request("/api/settings", {
-        method: "PUT",
-        body: JSON.stringify({
-          aiEnabled: form.get("aiEnabled") === "on",
-          aiBaseUrl: form.get("aiBaseUrl"),
-          aiApiKey: form.get("aiApiKey"),
-          aiModel: form.get("aiModel")
-        })
-      });
-      $("#ai-api-key").value = "";
-      toast("AI 设置已保存。");
-    });
+    await saveAiSettings({
+      aiEnabled: form.get("aiEnabled") === "on",
+      aiBaseUrl: form.get("aiBaseUrl"),
+      aiApiKey: form.get("aiApiKey"),
+      aiModel: form.get("aiModel")
+    }, { saveDraft: true });
   });
 
 
@@ -504,6 +606,18 @@ async function bootstrap() {
     withAction(event.currentTarget, async () => {
       const browser = await request("/api/browser/verify", { method: "POST" });
       toast(browser.state === "verified" ? "闲鱼登录已验证。" : browser.message, browser.state !== "verified");
+    })
+  );
+  $("#restart-login").addEventListener("click", (event) =>
+    withAction(event.currentTarget, async () => {
+      const status = await request("/api/browser/restart-login", { method: "POST" });
+      toast(status.lastActivity);
+    })
+  );
+  $("#switch-browser").addEventListener("click", (event) =>
+    withAction(event.currentTarget, async () => {
+      const status = await request("/api/browser/switch", { method: "POST" });
+      toast(status.lastActivity);
     })
   );
   $("#resume-monitor").addEventListener("click", (event) =>

@@ -1,5 +1,8 @@
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { chromium } from "playwright-core";
 import { XianyuBrowser } from "../src/browser.js";
 
@@ -145,17 +148,6 @@ browserTest("a successful scan clicks visible sort options and parses the respon
   assert.equal(browser.status().state, "verified");
 });
 
-browserTest("a challenge appearing during the search gap prevents navigation", async (t) => {
-  const { browser, page, requests } = await fixture(t);
-  browser.lastSearchStartedAt = Date.now();
-  page.waitForTimeout = async () => {
-    await page.setContent('<body><div class="baxia-dialog-mask" style="height:100px">Check</div></body>');
-  };
-  const count = requests.length;
-  await assert.rejects(browser.scan({ keyword: "gpu" }), /验证/);
-  assert.equal(requests.length, count);
-});
-
 browserTest("sort click failure removes pending response listeners", async (t) => {
   const { browser, page } = await scanFixture(t);
   const getByText = page.getByText.bind(page);
@@ -203,5 +195,41 @@ browserTest("closing a scanning browser never automatically retries the search",
   };
   await assert.rejects(browser.scan({ keyword: "gpu" }), /浏览器已关闭/);
   assert.equal(navigations, 1);
+  assert.equal(browser.status().state, "waiting_for_login");
+});
+
+browserTest("closing and reopening starts a fresh login page with the same profile path", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "xianyu-login-test-"));
+  const browser = new XianyuBrowser({ dataDirectory: directory });
+  t.after(async () => {
+    await browser.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const profiles = [];
+  const requests = [];
+  browser.playwright = {
+    launchPersistentContext: async (profile) => {
+      profiles.push(profile);
+      const context = await chrome.newContext({ serviceWorkers: "block" });
+      await context.route("**/*", async (route) => {
+        requests.push(route.request().url());
+        await route.fulfill({ contentType: "text/html", body: "<body>Login fixture</body>" });
+      });
+      return context;
+    }
+  };
+  await browser.openLogin();
+  const originalPage = browser.page;
+  await browser.context.addCookies([{ name: "unb", value: "fixture", domain: ".goofish.com", path: "/" }]);
+  assert.equal((await browser.verifyLogin()).state, "verified");
+  await browser.context.close();
+  assert.equal(browser.status().state, "not_started");
+  assert.equal(browser.status().browserOpen, false);
+  await browser.openLogin();
+  assert.equal(originalPage.isClosed(), true);
+  assert.notEqual(browser.page, originalPage);
+  assert.equal(browser.page.url(), "https://www.goofish.com/");
+  assert.deepEqual(profiles, [browser.profileDirectory, browser.profileDirectory]);
+  assert.deepEqual(requests, ["https://www.goofish.com/", "https://www.goofish.com/"]);
   assert.equal(browser.status().state, "waiting_for_login");
 });

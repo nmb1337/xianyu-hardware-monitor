@@ -1,20 +1,5 @@
 import { categoryLabel } from "./categories.js";
 import { evaluateListing } from "./filter.js";
-import {
-  VERIFICATION_COOLDOWN_MS,
-  MINIMUM_SEARCH_GAP_MS,
-  GLOBAL_SEARCH_INTERVAL_MIN_MS,
-  GLOBAL_SEARCH_INTERVAL_MAX_MS,
-  GLOBAL_SEARCH_SLOT_GRACE_MS,
-  SEARCHES_PER_HOUR,
-  SEARCH_WINDOW_MS,
-  isQuietHours,
-  nextActiveSearchTime,
-  nextAccessCooldownMs,
-  nextGlobalSearchDelayMs
-} from "./pacing.js";
-
-const GLOBAL_SEARCH_NEXT_AT_KEY = "xianyu_global_search_next_at";
 
 function roundPrice(price) {
   return Number(price).toLocaleString("zh-CN", {
@@ -37,38 +22,37 @@ function isAccessBlockState(state) {
   return state === "waiting_for_verification" || state === "waiting_for_login";
 }
 
-function formatClock(timestamp) {
-  return new Intl.DateTimeFormat("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(new Date(timestamp));
-}
-
 export class MonitorService {
-  constructor({ database, browser, notifier, ai = null, random = Math.random }) {
+  constructor({ database, browser, notifier, ai = null }) {
     this.database = database;
     this.browser = browser;
     this.notifier = notifier;
     this.ai = ai;
-    this.random = random;
     this.running = false;
     this.startedAt = null;
     this.lastActivity = "监控尚未启动";
     this.activeRuleId = null;
+    this.lastScannedRuleId = null;
     this.loopPromise = null;
     this.notificationTimer = null;
     this.wakeLoop = null;
-    this.accessPauseUntil = Number(this.database.getSetting("xianyu_access_pause_until")) || 0;
-    this.accessPaused = this.database.getSetting("xianyu_access_paused") === "1"
-      || this.accessPauseUntil > Date.now();
-    this.accessPauseKind = this.database.getSetting("xianyu_access_pause_kind") || "verification";
+    this.accessPaused = false;
+    this.accessPauseKind = "";
+    this.accessRecoveryState = "none";
+    this.accessPauseNotified = false;
+    this.manualRecoveryNoticeSent = false;
+    this.autoRecoveryStreak = 0;
+    this.lastAutoSwitchBrowser = "";
+    this.recoveryReportPending = false;
     this.scanOperation = Promise.resolve();
     this.scanGeneration = 0;
-    this.#resetOverdueGlobalSearchSlot();
+    this.restartLoginPromise = null;
   }
 
   status() {
     const paused = this.#isAccessPaused();
+    const enabledRules = this.database.listRules().filter((rule) => rule.enabled);
+    const nextRule = this.#nextRule(enabledRules);
     return {
       running: this.running,
       startedAt: this.startedAt,
@@ -77,16 +61,12 @@ export class MonitorService {
       browser: this.browser.status(),
       astrbotConfigured: this.notifier.configured(),
       accessPaused: paused,
-      accessPauseUntil: paused ? this.accessPauseUntil : 0,
       accessPauseKind: paused ? this.accessPauseKind : "",
-      nextSearchAt: this.#globalSearchNextAt(),
-      searchIntervalMinMs: this.#searchRange().min,
-      searchIntervalMaxMs: this.#searchRange().max,
-      quietHoursActive: isQuietHours(),
-      searchesLastHour: this.database.recentSearchAttempts(Date.now() - SEARCH_WINDOW_MS).length,
-      searchesPerHour: SEARCHES_PER_HOUR,
-      backoffUntil: Number(this.database.getSetting("xianyu_backoff_until")) || 0,
-      recoveryState: this.database.getSetting("xianyu_recovery_state") || "none"
+      recoveryState: paused ? this.accessRecoveryState : "none",
+      enabledRuleCount: enabledRules.length,
+      nextRuleId: nextRule?.id ?? null,
+      nextRuleName: nextRule?.name ?? "",
+      lastScannedRuleId: this.lastScannedRuleId
     };
   }
 
@@ -96,12 +76,9 @@ export class MonitorService {
     }
     this.running = true;
     this.startedAt = Date.now();
-    const nextSearchAt = this.#resetOverdueGlobalSearchSlot();
     this.lastActivity = this.#isAccessPaused()
       ? this.#accessPauseMessage()
-      : isQuietHours()
-        ? "夜间静默时段（00:00-08:00），低价搜索保持关闭。"
-      : `监控已启动。下一次随机搜索预计在 ${formatClock(nextSearchAt)}。`;
+      : "监控已启动，将按规则顺序连续查询。";
     this.loopPromise = this.#runLoop();
     this.notificationTimer = setInterval(() => {
       this.notifier.processOne().catch(() => {});
@@ -112,6 +89,7 @@ export class MonitorService {
   async stop() {
     this.running = false;
     this.scanGeneration += 1;
+    this.ai?.cancelPending?.();
     this.wakeLoop?.();
     if (this.notificationTimer) {
       clearInterval(this.notificationTimer);
@@ -150,33 +128,20 @@ export class MonitorService {
     if (!force && !rule.enabled) {
       return { scanned: false, reason: "规则未启用", matched: 0, queued: 0 };
     }
-    if (!force && rule.nextScanAt > Date.now()) {
-      return { scanned: false, reason: "尚未到扫描时间", matched: 0, queued: 0 };
-    }
     if (this.#isAccessPaused()) {
       const reason = this.#accessPauseMessage();
       this.lastActivity = reason;
       return { scanned: false, reason, matched: 0, queued: 0 };
     }
-    if (isQuietHours()) {
-      const reason = "夜间静默时段（00:00-08:00），低价搜索已关闭。";
-      this.lastActivity = reason;
-      return { scanned: false, reason, matched: 0, queued: 0 };
-    }
-    const globalSlot = this.#claimGlobalSearchSlot(rule.id);
-    if (!globalSlot.allowed) {
-      const reason = this.#globalSearchWaitMessage(globalSlot.nextSearchAt);
-      this.lastActivity = reason;
-      return { scanned: false, reason, matched: 0, queued: 0 };
-    }
 
     this.activeRuleId = rule.id;
+    const generation = this.scanGeneration;
     this.lastActivity = `正在扫描：${rule.name}`;
     let errorMessage = null;
     const baseline = !rule.lastScannedAt;
     try {
       const listings = await this.browser.scan(rule);
-      this.database.setSetting("xianyu_access_block_count", "0");
+      this.autoRecoveryStreak = 0;
       let matched = 0;
       let queued = 0;
       let alreadySeen = 0;
@@ -185,10 +150,11 @@ export class MonitorService {
         listing,
         outcome: evaluateListing(rule, listing)
       }));
-      const aiCandidates = !baseline && this.ai?.configured()
+      const aiCandidates = generation === this.scanGeneration && !baseline && this.ai?.configured()
         ? evaluated.filter(({ listing, outcome }) => outcome.eligible && outcome.matched
           && !this.database.hasListing(rule.id, listing.itemId)
-          && !this.database.isListingBlocked(listing.itemId)).map(({ listing, outcome }) => ({
+          && !this.database.isListingBlocked(listing.itemId)
+          && !this.database.isAiExempt(listing.itemId)).map(({ listing, outcome }) => ({
           ...listing,
           price: outcome.price
         }))
@@ -202,9 +168,15 @@ export class MonitorService {
         if (!outcome.eligible) {
           continue;
         }
-        const aiDecision = aiResult.decisions.get(listing.itemId);
+        // Restored items are never filtered or blocked again by AI decisions.
+        const aiDecision = this.database.isAiExempt(listing.itemId)
+          ? undefined
+          : aiResult.decisions.get(listing.itemId);
         const aiBlockedListing = outcome.matched && aiDecision?.block === true;
         const aiRejected = outcome.matched && aiDecision?.notify === false;
+        if (aiRejected) {
+          this.database.recordAiRejection(rule, { ...listing, price: outcome.price }, aiDecision);
+        }
         if (aiBlockedListing) {
           this.database.blockListing({
             ...listing,
@@ -239,37 +211,32 @@ export class MonitorService {
           alreadySeen += 1;
         }
       }
-      const aiNote = aiResult.error
-        ? `，AI 审核失败，已保留规则匹配结果`
-        : aiFiltered
-          ? `，AI 过滤 ${aiFiltered} 个疑似不匹配商品${aiBlocked ? `（已屏蔽 ${aiBlocked} 个）` : ""}`
-          : "";
+      const aiNote = aiResult.cancelled
+        ? `，AI 审核已取消，已保留规则匹配结果`
+        : aiResult.error
+          ? aiResult.decisions.size
+            ? `，AI 审核部分失败，未审核商品已照常提醒`
+            : `，AI 审核失败，已保留规则匹配结果`
+          : aiFiltered
+            ? `，AI 过滤 ${aiFiltered} 个疑似不匹配商品${aiBlocked ? `（已屏蔽 ${aiBlocked} 个）` : ""}`
+            : "";
       this.lastActivity = baseline
         ? `已建立基线：${rule.name}，记录 ${listings.length} 个结果。`
         : `扫描完成：${rule.name}，低价匹配 ${matched} 个，已见未提醒 ${alreadySeen} 个，新增提醒 ${queued} 个${blocked ? `，已屏蔽 ${blocked} 个` : ""}${aiNote}。`;
+      await this.#reportRecoveryScan(`恢复后首次扫描完成。\n${this.lastActivity}`);
       return { scanned: true, baseline, listings: listings.length, matched, alreadySeen, queued, blocked, aiFiltered, aiBlocked, aiError: aiResult.error };
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : "未知扫描错误";
-      if (isAccessBlockState(this.browser.status().state)) {
-        await this.#pauseForAccess(
-          this.browser.status().state === "waiting_for_login" ? "login" : "verification"
-        );
+      const browserState = this.browser.status().state;
+      if (isAccessBlockState(browserState)) {
+        await this.#pauseForAccess(browserState === "waiting_for_login" ? "login" : "verification");
       } else {
         this.lastActivity = `扫描失败：${rule.name}，${errorMessage}`;
+        await this.#reportRecoveryScan(`恢复后首次扫描未完成。\n${this.lastActivity}`);
       }
       throw error;
     } finally {
-      // A slow or interrupted scan must not consume the following waiting period.
-      this.database.setSetting(
-        GLOBAL_SEARCH_NEXT_AT_KEY,
-        nextActiveSearchTime(Math.max(this.#globalSearchNextAt(), Date.now() + globalSlot.delayMs))
-      );
-      const jitter = 5_000 + Math.floor(this.random() * 20_000);
-      let nextScanAt = Date.now() + rule.scanIntervalSeconds * 1_000 + jitter;
-      if (this.#isAccessPaused()) {
-        nextScanAt = Math.max(nextScanAt, this.accessPauseUntil + MINIMUM_SEARCH_GAP_MS);
-      }
-      this.database.markRuleScanned(rule.id, { nextScanAt, error: errorMessage });
+      this.database.markRuleScanned(rule.id, { error: errorMessage });
       this.activeRuleId = null;
     }
   }
@@ -284,64 +251,143 @@ export class MonitorService {
     return result;
   }
 
+  restartLogin() {
+    if (this.restartLoginPromise) {
+      return this.restartLoginPromise;
+    }
+    this.scanGeneration += 1;
+    this.ai?.cancelPending?.();
+    this.restartLoginPromise = this.#withScanOperation(async () => {
+      this.accessPaused = true;
+      if (!this.accessPauseKind) {
+        this.accessPauseKind = "login";
+      }
+      await this.#openBrowser({ restart: true });
+      return this.status();
+    }).finally(() => {
+      this.restartLoginPromise = null;
+    });
+    return this.restartLoginPromise;
+  }
+
+  async openLogin() {
+    return this.#withScanOperation(async () => {
+      if (this.#isAccessPaused()) {
+        await this.#openBrowser();
+        return this.browser.status();
+      }
+      return this.browser.openLogin();
+    });
+  }
+
+  async closeBrowser() {
+    this.scanGeneration += 1;
+    this.ai?.cancelPending?.();
+    return this.#withScanOperation(async () => {
+      if (this.#isAccessPaused()) {
+        this.accessRecoveryState = "closed_by_user";
+      }
+      try {
+        return await this.browser.close();
+      } catch (error) {
+        if (this.#isAccessPaused()) {
+          this.accessRecoveryState = "close_failed";
+        }
+        throw error;
+      }
+    });
+  }
+
+  async switchBrowser() {
+    return this.#withScanOperation(async () => {
+      if (this.activeRuleId) {
+        throw new Error("当前仍在扫描，请等待本轮结束后再切换浏览器。");
+      }
+      this.scanGeneration += 1;
+      this.ai?.cancelPending?.();
+      await this.browser.switchBrowser();
+      if (this.#isAccessPaused()) {
+        await this.#openBrowser();
+        return this.status();
+      }
+      try {
+        await this.browser.openLogin();
+      } catch {
+        throw new Error("备用浏览器打开失败，请检查浏览器后重试。");
+      }
+      this.lastActivity = `已切换到 ${this.browser.status().browserName}。`;
+      return this.status();
+    });
+  }
+
+  async verifyLogin() {
+    return this.#withScanOperation(async () => {
+      const status = await this.browser.verifyLogin();
+      if (this.#isAccessPaused() && status.state === "verified") {
+        await this.#completeAccessRecovery();
+      }
+      return status;
+    });
+  }
+
   async resumeAfterHumanCheck() {
     return this.#withScanOperation(async () => {
       if (!this.#isAccessPaused()) {
         return this.status();
       }
-      if (this.accessPauseKind === "verification" && Date.now() < this.accessPauseUntil) {
-        throw new Error(`访问验证冷却尚未结束。${this.#accessPauseMessage()}`);
-      }
       const browserStatus = await this.browser.verifyLogin();
       if (browserStatus.state !== "verified") {
-        await this.#pauseForAccess(
-          browserStatus.state === "waiting_for_login" ? "login" : "verification"
-        );
-        throw new Error(browserStatus.message || "尚未完成登录或验证，自动搜索保持暂停。");
+        throw new Error(browserStatus.message || "尚未完成登录或验证，自动查询保持暂停。");
       }
-      this.#clearAccessPause();
-      this.database.postponeEnabledRules(Date.now(), MINIMUM_SEARCH_GAP_MS, { reset: true });
-      const nextSearchAt = this.#resetOverdueGlobalSearchSlot();
-      this.lastActivity = this.running
-        ? `已确认闲鱼登录，自动搜索将按低频节奏恢复，下一次预计在 ${formatClock(nextSearchAt)}。`
-        : "已解除访问暂停；监控仍处于停止状态。";
-      return this.status();
+      return this.#completeAccessRecovery();
     });
+  }
+
+  async #completeAccessRecovery({ automatic = false } = {}) {
+    this.accessPaused = false;
+    this.accessPauseKind = "";
+    this.accessRecoveryState = "none";
+    this.accessPauseNotified = false;
+    this.manualRecoveryNoticeSent = false;
+    this.recoveryReportPending = true;
+    this.lastActivity = this.running
+      ? `${automatic ? "已自动确认闲鱼登录" : "已确认闲鱼登录"}，继续按规则顺序查询。`
+      : "已确认闲鱼登录；监控仍处于停止状态。";
+    await this.#sendStatusMessage(`登录已恢复。${this.lastActivity}${this.running
+      ? "恢复后的首次扫描会汇报结果；没有新低价商品也会汇报。"
+      : "启动监控后会继续查询。"}`);
+    this.wakeLoop?.();
+    return this.status();
   }
 
   async #runLoop() {
     while (this.running) {
       if (this.#isAccessPaused()) {
-        this.lastActivity = this.#accessPauseMessage();
-        await this.#reopenAfterCooldown();
-        await this.#waitForLoop(15_000);
-        continue;
-      }
-      if (isQuietHours()) {
-        this.lastActivity = "夜间静默时段（00:00-08:00），低价搜索保持关闭。";
-        await this.#waitForLoop(15_000);
+        await this.#recoverAccess();
+        if (this.#isAccessPaused()) {
+          await this.#waitForLoop(15_000);
+        }
         continue;
       }
 
-      const nextSearchAt = this.#resetOverdueGlobalSearchSlot({ allowDue: true });
-      if (nextSearchAt > Date.now()) {
-        await this.#waitForLoop(Math.min(15_000, nextSearchAt - Date.now()));
-        continue;
-      }
-
-      const rules = this.database.dueRules();
+      const rules = this.database.enabledRulesInOrder();
       if (!rules.length) {
-        this.lastActivity = "等待已启用规则到期；到期后只会搜索其中一条。";
+        this.lastActivity = "没有已启用的规则，等待添加。";
         await this.#waitForLoop(15_000);
         continue;
       }
 
+      const rule = this.#nextRule(rules);
       try {
-        await this.scanRule(rules[0]);
-        await this.notifier.processOne();
+        await this.scanRule(rule);
       } catch {
-        // The failure is persisted on the rule and surfaced in the console.
+        // The failure is recorded on the rule; keep the rotation moving.
+      } finally {
+        this.lastScannedRuleId = rule.id;
       }
+      await this.notifier.processOne();
+      // Yield to the event loop so even instant failures cannot starve the process.
+      await new Promise((resolve) => setImmediate(resolve));
     }
   }
 
@@ -360,156 +406,216 @@ export class MonitorService {
     });
   }
 
-  #globalSearchNextAt() {
-    const value = Number(this.database.getSetting(GLOBAL_SEARCH_NEXT_AT_KEY));
-    return value > 0 && Number.isSafeInteger(value) && Number.isFinite(new Date(value).getTime())
-      ? value
-      : 0;
-  }
-
-  #scheduleGlobalSearchAfter(timestamp) {
-    const range = this.#searchRange();
-    const delay = range.min + Math.floor(this.random() * (range.max - range.min));
-    const nextSearchAt = nextActiveSearchTime(timestamp + delay);
-    this.database.setSetting(GLOBAL_SEARCH_NEXT_AT_KEY, nextSearchAt);
-    return nextSearchAt;
-  }
-
-  #resetOverdueGlobalSearchSlot({ allowDue = false } = {}) {
-    const nextSearchAt = this.#globalSearchNextAt();
-    const cutoff = Date.now() - (allowDue ? GLOBAL_SEARCH_SLOT_GRACE_MS : 0);
-    return nextSearchAt && nextSearchAt > cutoff
-      ? nextSearchAt
-      : this.#scheduleGlobalSearchAfter(Date.now());
-  }
-
-  #claimGlobalSearchSlot(ruleId) {
-    const nextSearchAt = this.#resetOverdueGlobalSearchSlot({ allowDue: true });
-    if (nextSearchAt > Date.now()) {
-      return { allowed: false, nextSearchAt };
+  #nextRule(rules) {
+    if (!rules.length) {
+      return null;
     }
-    // Reserve before browser access so a crash or request failure cannot trigger an immediate retry.
-    const now = Date.now();
-    const attempts = this.database.recentSearchAttempts(now - SEARCH_WINDOW_MS);
-    if (attempts.length >= SEARCHES_PER_HOUR) {
-      const nextSearchAt = nextActiveSearchTime(attempts[attempts.length - SEARCHES_PER_HOUR] + SEARCH_WINDOW_MS + 1);
-      this.database.setSetting(GLOBAL_SEARCH_NEXT_AT_KEY, nextSearchAt);
-      return { allowed: false, nextSearchAt };
+    const index = rules.findIndex((rule) => rule.id === this.lastScannedRuleId);
+    if (index === -1) {
+      return rules[0];
     }
-    const range = this.#searchRange();
-    const delayMs = range.min + Math.floor(this.random() * (range.max - range.min));
-    const reservedAt = nextActiveSearchTime(now + delayMs);
-    this.database.reserveSearchAttempt(ruleId, now, reservedAt);
-    return {
-      allowed: true,
-      nextSearchAt: reservedAt,
-      delayMs
-    };
-  }
-
-  #searchRange() {
-    return Number(this.database.getSetting("xianyu_backoff_until")) > Date.now()
-      ? { min: 90 * 60_000, max: 120 * 60_000 }
-      : { min: GLOBAL_SEARCH_INTERVAL_MIN_MS, max: GLOBAL_SEARCH_INTERVAL_MAX_MS };
-  }
-
-  #globalSearchWaitMessage(nextSearchAt) {
-    return `全局低频保护已启用：下一次仅搜索一条规则，预计在 ${formatClock(nextSearchAt)}。`;
+    return rules[(index + 1) % rules.length];
   }
 
   #isAccessPaused() {
     return this.accessPaused;
   }
 
-  async #pauseForAccess(kind) {
-    const newPause = !this.accessPaused;
-    if (!this.accessPaused) {
-      this.accessPauseKind = kind === "login" ? "login" : "verification";
-      const count = Number(this.database.getSetting("xianyu_access_block_count") || 0) + 1;
-      this.database.setSetting("xianyu_access_block_count", String(count));
-      this.accessPauseUntil = Date.now() + nextAccessCooldownMs(count);
-    } else if (kind === "verification" && this.accessPauseKind === "login") {
-      this.accessPauseKind = "verification";
-      this.accessPauseUntil = Math.max(
-        this.accessPauseUntil,
-        Date.now() + VERIFICATION_COOLDOWN_MS
-      );
-    }
-    this.accessPaused = true;
-    this.database.setSetting("xianyu_access_paused", "1");
-    this.database.setSetting("xianyu_access_pause_until", this.accessPauseUntil);
-    this.database.setSetting("xianyu_access_pause_kind", this.accessPauseKind);
-    this.database.setSetting("xianyu_backoff_until", Date.now() + 6 * 60 * 60_000);
-    this.database.postponeEnabledRules(this.accessPauseUntil, MINIMUM_SEARCH_GAP_MS);
-    this.lastActivity = this.#accessPauseMessage();
-    if (newPause) {
-      this.database.setSetting("xianyu_recovery_state", "cooling");
-      if (typeof this.browser.close === "function") {
-        await this.browser.close().catch(() => {
-          this.database.setSetting("xianyu_recovery_state", "close_failed");
-        });
-      }
-      await this.#notifyAccessPause();
-    }
+  #canAutoRecover() {
+    return this.autoRecoveryStreak < 2 && typeof this.browser?.openLogin === "function";
   }
 
-  async #reopenAfterCooldown() {
-    if (this.database.getSetting("xianyu_recovery_state") !== "cooling"
-      || Date.now() < this.accessPauseUntil || isQuietHours()) {
+  #canAutoSwitch() {
+    if (!this.#canAutoRecover()) {
+      return false;
+    }
+    if (typeof this.browser?.switchBrowser !== "function") {
+      return false;
+    }
+    const status = this.browser.status();
+    return Boolean(status.canSwitch && status.alternateBrowserName);
+  }
+
+  async #pauseForAccess(kind) {
+    const isNew = !this.accessPaused;
+    this.accessPaused = true;
+    this.accessPauseKind = kind === "login" ? "login" : "verification";
+    if (!isNew) {
+      this.lastActivity = this.#accessPauseMessage();
       return;
     }
-    // Persist before opening: restarting cannot produce repeated login windows.
-    this.database.setSetting("xianyu_recovery_state", "awaiting_human");
+    this.accessRecoveryState = "closing";
+    this.manualRecoveryNoticeSent = false;
+    this.recoveryReportPending = false;
+    this.lastActivity = this.#accessPauseMessage();
+    if (typeof this.browser.close === "function") {
+      try {
+        await this.browser.close();
+        this.accessRecoveryState = "closed";
+      } catch {
+        this.accessRecoveryState = "close_failed";
+      }
+    } else {
+      this.accessRecoveryState = "close_failed";
+    }
+    this.lastActivity = this.#accessPauseMessage();
+    await this.#notifyAccessPause();
+  }
+
+  async #recoverAccess() {
+    return this.#withScanOperation(async () => {
+      if (!this.running || !this.#isAccessPaused()) {
+        return;
+      }
+      if (this.accessRecoveryState === "closed") {
+        if (!this.#canAutoRecover()) {
+          this.accessRecoveryState = "manual";
+          await this.#notifyManualRecovery();
+          return;
+        }
+        await this.#openBrowser({ automatic: true }).catch(() => {});
+        return;
+      }
+      if (this.accessRecoveryState === "checking") {
+        await this.#checkAccessRecovery();
+      }
+    });
+  }
+
+  async #notifyManualRecovery() {
+    if (this.manualRecoveryNoticeSent) {
+      return;
+    }
+    this.manualRecoveryNoticeSent = true;
+    await this.#sendStatusMessage(this.#accessPauseMessage());
+  }
+
+  async #openBrowser({ restart = false, automatic = false } = {}) {
+    if (restart) {
+      this.accessRecoveryState = "closing";
+      try {
+        await this.browser.close();
+      } catch {
+        this.accessRecoveryState = "close_failed";
+        throw new Error("闲鱼浏览器关闭失败，请手动关闭监控窗口后重试。");
+      }
+    }
+    if (automatic) {
+      if (this.#canAutoSwitch()) {
+        try {
+          await this.browser.switchBrowser();
+        } catch {
+          this.accessRecoveryState = "switch_failed";
+          throw new Error("备用浏览器切换失败，请点击“重新登录”重试。");
+        }
+        this.lastAutoSwitchBrowser = this.browser.status().browserName;
+        this.lastActivity = `已自动切换到 ${this.lastAutoSwitchBrowser}，正在确认登录。`;
+      }
+      this.autoRecoveryStreak += 1;
+    }
+    this.accessRecoveryState = "opening";
     try {
       await this.browser.openLogin();
     } catch {
-      this.database.setSetting("xianyu_recovery_state", "open_failed");
+      this.accessRecoveryState = "open_failed";
+      throw new Error("闲鱼登录窗口打开失败，请点击“重新登录”重试。");
     }
+    this.accessRecoveryState = "checking";
+    await this.#checkAccessRecovery();
   }
 
-  #clearAccessPause() {
-    this.accessPaused = false;
-    this.accessPauseUntil = 0;
-    this.accessPauseKind = "";
-    this.database.setSetting("xianyu_access_paused", "0");
-    this.database.setSetting("xianyu_access_pause_until", "0");
-    this.database.setSetting("xianyu_access_pause_kind", "");
-    this.database.setSetting("xianyu_pause_notified", "0");
-    this.database.setSetting("xianyu_recovery_state", "none");
+  async #checkAccessRecovery() {
+    if (!this.browser.status().browserOpen) {
+      this.accessRecoveryState = "closed_by_user";
+      return;
+    }
+    let status;
+    try {
+      status = await this.browser.verifyLogin({ openIfNeeded: false });
+    } catch {
+      this.accessRecoveryState = "checking";
+      return;
+    }
+    if (status.state === "verified") {
+      await this.#completeAccessRecovery({ automatic: true });
+      return;
+    }
+    this.accessRecoveryState = "checking";
   }
 
   async #notifyAccessPause() {
-    if (this.database.getSetting("xianyu_pause_notified") === "1") {
+    if (this.accessPauseNotified) {
       return;
     }
-    this.database.setSetting("xianyu_pause_notified", "1");
+    this.accessPauseNotified = true;
+    const followUp = this.#canAutoSwitch()
+      ? `即将自动切换到 ${this.browser.status().alternateBrowserName} 并确认缓存登录；确认有效后自动继续查询，不会填写密码或处理验证码。`
+      : "将复用已缓存的登录资料；不会填写密码或处理验证码。";
+    await this.#sendStatusMessage(`${this.#accessPauseMessage()}${followUp}`);
+  }
+
+  async #reportRecoveryScan(message) {
+    if (!this.recoveryReportPending) {
+      return;
+    }
+    this.recoveryReportPending = false;
+    await this.#sendStatusMessage(message);
+  }
+
+  async #sendStatusMessage(message) {
     if (!this.notifier.configured()) {
-      return;
+      return false;
     }
-    const message = this.accessPauseKind === "login"
-      ? "闲鱼硬件监控：登录已失效，自动搜索已暂停。请在电脑上打开浏览器完成登录后，点击“恢复扫描”。"
-      : "闲鱼硬件监控：闲鱼要求访问验证，自动搜索已暂停。请在电脑上人工完成验证，冷却结束后点击“恢复扫描”。不会自动重试或绕过验证。";
     try {
-      await this.notifier.sendMessage(message);
+      await this.notifier.sendMessage(`闲鱼硬件监控：${message}`);
+      return true;
     } catch {
       // Listing alerts still use the retry queue; this is a one-shot status ping.
+      return false;
     }
   }
 
   #accessPauseMessage() {
-    const action = "请在浏览器中人工处理后点击“恢复扫描”。";
-    if (this.accessPauseKind === "login" || this.accessPauseUntil <= Date.now()) {
-      return this.accessPauseKind === "login"
-        ? `闲鱼登录失效，已暂停自动搜索。${action}`
-        : `闲鱼访问验证后已暂停自动搜索。${action}`;
-    }
-    const time = new Intl.DateTimeFormat("zh-CN", {
-      hour: "2-digit",
-      minute: "2-digit"
-    }).format(new Date(this.accessPauseUntil));
     const prefix = this.accessPauseKind === "login"
-      ? "闲鱼登录失效，已暂停自动搜索"
-      : "闲鱼访问验证后已暂停自动搜索";
-    return `${prefix}。冷却至 ${time}，到时仍需手动恢复。${action}`;
+      ? "闲鱼登录已失效，自动查询已暂停。"
+      : "闲鱼要求访问验证，自动查询已暂停。";
+    const target = this.#canAutoSwitch() ? this.browser.status().alternateBrowserName : "";
+    let action;
+    switch (this.accessRecoveryState) {
+      case "closing":
+        action = "正在关闭旧窗口。";
+        break;
+      case "closed":
+        action = !this.running
+          ? "旧窗口已关闭，监控未启动；点击“打开登录”或“重新登录”即可继续。"
+          : target
+            ? `旧窗口已关闭，即将自动切换到 ${target} 并打开登录窗口；确认登录有效后会自动继续查询。`
+            : "旧窗口已关闭，即将自动打开登录窗口；确认登录有效后会自动继续查询。";
+        break;
+      case "switch_failed":
+        action = "备用浏览器切换失败，请点击“重新登录”重试。";
+        break;
+      case "manual":
+        action = "访问验证连续出现，已停止自动切换窗口；请点击“打开登录”人工完成验证，确认有效后会自动继续查询。";
+        break;
+      case "opening":
+        action = "正在打开登录窗口并确认登录。";
+        break;
+      case "checking":
+        action = "登录窗口已打开，正在自动确认登录；有效后立即继续查询。如需人工登录或验证，完成后无需点击按钮。";
+        break;
+      case "closed_by_user":
+        action = "浏览器窗口已手动关闭，不会自动重开；需要时点击“打开登录”。";
+        break;
+      case "close_failed":
+        action = "旧窗口关闭失败，请手动关闭后点击“重新登录”。";
+        break;
+      case "open_failed":
+        action = "登录窗口打开失败，请点击“重新登录”重试。";
+        break;
+      default:
+        action = "等待登录确认；确认有效后会自动继续查询。";
+    }
+    return `${prefix}${action}`;
   }
 }

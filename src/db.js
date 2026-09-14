@@ -1,7 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { MINIMUM_RULE_INTERVAL_SECONDS } from "./pacing.js";
 
 function now() {
   return Date.now();
@@ -41,11 +40,9 @@ function toRule(row) {
     priceCeilingCny: row.price_ceiling_cny,
     personalOnly: toBoolean(row.personal_only),
     enabled: toBoolean(row.enabled),
-    scanIntervalSeconds: Math.max(row.scan_interval_seconds, MINIMUM_RULE_INTERVAL_SECONDS),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     lastScannedAt: row.last_scanned_at,
-    nextScanAt: row.next_scan_at,
     lastError: row.last_error
   };
 }
@@ -123,10 +120,25 @@ export class MonitorDatabase {
         blocked_at INTEGER NOT NULL
       );
 
-      CREATE TABLE IF NOT EXISTS search_attempts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        rule_id INTEGER,
-        started_at INTEGER NOT NULL
+      CREATE TABLE IF NOT EXISTS ai_rejections (
+        rule_id INTEGER NOT NULL REFERENCES rules(id) ON DELETE CASCADE,
+        item_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        price REAL NOT NULL,
+        url TEXT NOT NULL,
+        seller_name TEXT NOT NULL DEFAULT '',
+        reason TEXT NOT NULL,
+        evidence TEXT NOT NULL DEFAULT '',
+        confidence REAL,
+        blocked INTEGER NOT NULL DEFAULT 0,
+        reviewed_at INTEGER NOT NULL,
+        PRIMARY KEY (rule_id, item_id)
+      );
+
+      -- Listings the user manually restored; AI must not filter or block them again.
+      CREATE TABLE IF NOT EXISTS ai_exempt_items (
+        item_id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL
       );
 
       CREATE INDEX IF NOT EXISTS idx_rules_due
@@ -137,7 +149,7 @@ export class MonitorDatabase {
         ON notifications(status, available_at);
       CREATE INDEX IF NOT EXISTS idx_blocked_listings_time
         ON blocked_listings(blocked_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_search_attempts_time ON search_attempts(started_at);
+      CREATE INDEX IF NOT EXISTS idx_ai_rejections_time ON ai_rejections(reviewed_at DESC);
     `);
 
     const columns = this.db.prepare("PRAGMA table_info(rules)").all();
@@ -155,7 +167,7 @@ export class MonitorDatabase {
         DELETE FROM notifications;
         DELETE FROM listings;
         UPDATE rules
-        SET last_scanned_at = NULL, next_scan_at = ${now()}, last_error = NULL;
+        SET last_scanned_at = NULL, last_error = NULL;
       `);
       this.setSetting("search_price_parser_version", "2");
     }
@@ -163,18 +175,19 @@ export class MonitorDatabase {
     this.db
       .prepare(`
         UPDATE rules
-        SET last_error = NULL, next_scan_at = ?
+        SET last_error = NULL
         WHERE last_error LIKE '%Target page, context or browser has been closed%'
       `)
-      .run(now());
+      .run();
 
+    // Retired "resume scanning" wording from earlier versions.
     this.db
-      .prepare(`
-        UPDATE rules
-        SET scan_interval_seconds = ?
-        WHERE scan_interval_seconds < ?
-      `)
-      .run(MINIMUM_RULE_INTERVAL_SECONDS, MINIMUM_RULE_INTERVAL_SECONDS);
+      .prepare("UPDATE rules SET last_error = NULL WHERE last_error LIKE '%再恢复扫描%'")
+      .run();
+
+    // Retired pacing, scan-mode and access-cooldown state from earlier versions.
+    this.db.exec("DELETE FROM settings WHERE key GLOB 'xianyu_*'");
+    this.db.exec("UPDATE rules SET next_scan_at = NULL");
   }
 
   close() {
@@ -264,7 +277,7 @@ export class MonitorDatabase {
 
   listRules() {
     return this.db
-      .prepare("SELECT * FROM rules ORDER BY enabled DESC, updated_at DESC, id DESC")
+      .prepare("SELECT * FROM rules ORDER BY enabled DESC, id ASC")
       .all()
       .map(toRule);
   }
@@ -280,8 +293,8 @@ export class MonitorDatabase {
       .prepare(`
         INSERT INTO rules (
           name, category, keyword, include_terms, exclude_terms, min_price_cny, price_ceiling_cny,
-          personal_only, enabled, scan_interval_seconds, created_at, updated_at, next_scan_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          personal_only, enabled, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         input.name,
@@ -293,8 +306,6 @@ export class MonitorDatabase {
         maximum,
         input.personalOnly ? 1 : 0,
         input.enabled ? 1 : 0,
-        input.scanIntervalSeconds,
-        timestamp,
         timestamp,
         timestamp
       );
@@ -314,8 +325,8 @@ export class MonitorDatabase {
       .prepare(`
         UPDATE rules SET
           name = ?, category = ?, keyword = ?, include_terms = ?, exclude_terms = ?,
-          min_price_cny = ?, price_ceiling_cny = ?, personal_only = ?, enabled = ?, scan_interval_seconds = ?,
-          updated_at = ?, last_scanned_at = NULL, next_scan_at = ?, last_error = NULL
+          min_price_cny = ?, price_ceiling_cny = ?, personal_only = ?, enabled = ?,
+          updated_at = ?, last_scanned_at = NULL, last_error = NULL
         WHERE id = ?
       `)
       .run(
@@ -328,9 +339,7 @@ export class MonitorDatabase {
         maximum,
         next.personalOnly ? 1 : 0,
         next.enabled ? 1 : 0,
-        next.scanIntervalSeconds,
         timestamp,
-        next.enabled ? timestamp : null,
         id
       );
     this.db
@@ -346,75 +355,23 @@ export class MonitorDatabase {
     return this.db.prepare("DELETE FROM rules WHERE id = ?").run(id).changes > 0;
   }
 
-  dueRules(timestamp = now()) {
+  enabledRulesInOrder() {
     return this.db
-      .prepare(`
-        SELECT * FROM rules
-        WHERE enabled = 1 AND (next_scan_at IS NULL OR next_scan_at <= ?)
-        ORDER BY COALESCE(next_scan_at, 0) ASC, id ASC
-      `)
-      .all(timestamp)
+      .prepare("SELECT * FROM rules WHERE enabled = 1 ORDER BY id ASC")
+      .all()
       .map(toRule);
   }
 
-  recentSearchAttempts(since) {
-    return this.db.prepare("SELECT started_at FROM search_attempts WHERE started_at > ? ORDER BY started_at")
-      .all(since).map((row) => row.started_at);
-  }
-
-  reserveSearchAttempt(ruleId, timestamp, nextSearchAt) {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      this.db.prepare("INSERT INTO search_attempts(rule_id, started_at) VALUES (?, ?)").run(ruleId, timestamp);
-      this.setSetting("xianyu_global_search_next_at", nextSearchAt);
-      this.db.prepare("DELETE FROM search_attempts WHERE started_at < ?").run(timestamp - 7 * 24 * 60 * 60_000);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  postponeEnabledRules(fromTimestamp = now(), gapMs = 90_000, { reset = false } = {}) {
-    const rows = this.db
-      .prepare(`
-        SELECT id, next_scan_at AS nextScanAt FROM rules
-        WHERE enabled = 1
-        ORDER BY COALESCE(next_scan_at, 0) ASC, id ASC
-      `)
-      .all();
-    const statement = this.db.prepare(
-      "UPDATE rules SET next_scan_at = ?, updated_at = ? WHERE id = ?"
-    );
-    const timestamp = now();
-    rows.forEach((row, index) => {
-      const scheduled = fromTimestamp + (index + 1) * gapMs;
-      const nextScanAt = reset
-        ? scheduled
-        : Math.max(Number(row.nextScanAt) || 0, scheduled);
-      statement.run(nextScanAt, timestamp, row.id);
-    });
-    return rows.length;
-  }
-
-  markRuleScanned(id, { nextScanAt, error = null }) {
+  markRuleScanned(id, { error = null } = {}) {
     if (error) {
       this.db
-        .prepare(`
-          UPDATE rules
-          SET next_scan_at = ?, last_error = ?, updated_at = ?
-          WHERE id = ?
-        `)
-        .run(nextScanAt, error, now(), id);
+        .prepare("UPDATE rules SET last_error = ?, updated_at = ? WHERE id = ?")
+        .run(error, now(), id);
       return;
     }
     this.db
-      .prepare(`
-        UPDATE rules
-        SET last_scanned_at = ?, next_scan_at = ?, last_error = NULL, updated_at = ?
-        WHERE id = ?
-      `)
-      .run(now(), nextScanAt, now(), id);
+      .prepare("UPDATE rules SET last_scanned_at = ?, last_error = NULL, updated_at = ? WHERE id = ?")
+      .run(now(), now(), id);
   }
 
   recordCandidateListing(rule, listing, price, shouldAlert, message) {
@@ -544,6 +501,47 @@ export class MonitorDatabase {
     );
   }
 
+  recordAiRejection(rule, listing, decision) {
+    if (decision.notify !== false) {
+      return;
+    }
+    const confidence = Number.isFinite(decision.confidence)
+      && decision.confidence >= 0 && decision.confidence <= 1 ? decision.confidence : null;
+    this.db.prepare(`
+      INSERT INTO ai_rejections (
+        rule_id, item_id, title, price, url, seller_name, reason, evidence,
+        confidence, blocked, reviewed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(rule_id, item_id) DO UPDATE SET
+        title = excluded.title, price = excluded.price, url = excluded.url,
+        seller_name = excluded.seller_name, reason = excluded.reason,
+        evidence = excluded.evidence, confidence = excluded.confidence,
+        blocked = excluded.blocked, reviewed_at = excluded.reviewed_at
+    `).run(
+      rule.id, String(listing.itemId), String(listing.title), listing.price,
+      String(listing.url), String(listing.sellerName ?? ""),
+      String(decision.reason ?? "").trim().slice(0, 500) || "AI 未提供具体理由",
+      String(decision.evidence ?? "").trim().slice(0, 200),
+      confidence, decision.block === true ? 1 : 0, now()
+    );
+  }
+
+  listAiRejections(limit = 100) {
+    return this.db.prepare(`
+      SELECT
+        reviews.rule_id AS ruleId, rules.name AS ruleName, reviews.item_id AS itemId,
+        reviews.title, reviews.price, reviews.url, reviews.seller_name AS sellerName,
+        reviews.reason, reviews.evidence, reviews.confidence, reviews.blocked,
+        reviews.reviewed_at AS reviewedAt,
+        EXISTS (SELECT 1 FROM blocked_listings WHERE item_id = reviews.item_id) AS isBlocked
+      FROM ai_rejections AS reviews
+      JOIN rules ON rules.id = reviews.rule_id
+      ORDER BY reviews.reviewed_at DESC, reviews.rule_id, reviews.item_id
+      LIMIT ?
+    `).all(Math.max(1, Math.min(500, Number(limit) || 100)))
+      .map((row) => ({ ...row, blocked: Boolean(row.blocked), isBlocked: Boolean(row.isBlocked) }));
+  }
+
   blockListing(listing) {
     const itemId = String(listing.itemId ?? "").trim();
     const title = String(listing.title ?? "").trim();
@@ -585,9 +583,10 @@ export class MonitorDatabase {
   }
 
   unblockListing(itemId) {
+    const id = String(itemId);
     const deleted = this.db
       .prepare("DELETE FROM blocked_listings WHERE item_id = ?")
-      .run(String(itemId)).changes > 0;
+      .run(id).changes > 0;
     if (!deleted) {
       return false;
     }
@@ -597,7 +596,56 @@ export class MonitorDatabase {
         SET status = 'pending', available_at = ?, last_error = NULL
         WHERE item_id = ? AND status = 'blocked' AND last_error = '商品已被屏蔽'
       `)
-      .run(now(), String(itemId));
+      .run(now(), id);
+    // Restoring is an explicit user decision: exempt the item from AI reviews.
+    this.#exemptItemFromAi(id);
+    return true;
+  }
+
+  #exemptItemFromAi(itemId) {
+    this.db
+      .prepare(`
+        INSERT INTO ai_exempt_items (item_id, created_at) VALUES (?, ?)
+        ON CONFLICT(item_id) DO NOTHING
+      `)
+      .run(String(itemId), now());
+  }
+
+  isAiExempt(itemId) {
+    return Boolean(
+      this.db
+        .prepare("SELECT 1 FROM ai_exempt_items WHERE item_id = ?")
+        .get(String(itemId))
+    );
+  }
+
+  restoreAiRejectedItem(itemId) {
+    const id = String(itemId);
+    const ruleIds = this.db
+      .prepare("SELECT rule_id FROM ai_rejections WHERE item_id = ?")
+      .all(id)
+      .map((row) => row.rule_id);
+    if (!ruleIds.length) {
+      return false;
+    }
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("DELETE FROM ai_rejections WHERE item_id = ?").run(id);
+      this.db.prepare("DELETE FROM blocked_listings WHERE item_id = ?").run(id);
+      for (const ruleId of ruleIds) {
+        // Drop the recorded listing so the next scan treats it as new again.
+        this.db.prepare("DELETE FROM listings WHERE rule_id = ? AND item_id = ?").run(ruleId, id);
+        this.db
+          .prepare("DELETE FROM notifications WHERE rule_id = ? AND item_id = ? AND status IN ('pending', 'blocked')")
+          .run(ruleId, id);
+      }
+      this.#exemptItemFromAi(id);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
     return true;
   }
 
