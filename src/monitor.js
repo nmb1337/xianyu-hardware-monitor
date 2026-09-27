@@ -1,9 +1,11 @@
 import { categoryLabel } from "./categories.js";
 import { evaluateListing } from "./filter.js";
 
-// Scan pacing: about one search per minute, with a random gap so the rhythm is not fixed.
-const SCAN_INTERVAL_MIN_MS = 45_000;
-const SCAN_INTERVAL_MAX_MS = 75_000;
+import { minutesToTime, normalizeScanPacing, parseTimeToMinutes } from "./scan-pacing.js";
+
+function randomBetween(minimum, maximum) {
+  return minimum + Math.floor(Math.random() * (maximum - minimum + 1));
+}
 
 function roundPrice(price) {
   return Number(price).toLocaleString("zh-CN", {
@@ -22,16 +24,44 @@ function buildMessage(rule, listing, price) {
   ].join("\n");
 }
 
+function buildMachineMessage(listing, appraisal) {
+  const lines = [];
+  if (appraisal) {
+    const priced = appraisal.parts.filter((part) => part.price > 0);
+    const unpriced = appraisal.parts.filter((part) => part.status === "unpriced");
+    const diffText = appraisal.diff === null
+      ? "—"
+      : `${appraisal.diff > 0 ? "+" : ""}${roundPrice(appraisal.diff)}`;
+    lines.push(`【整机疑似低价】${listing.title}`);
+    lines.push(`卖家价 ¥${roundPrice(listing.price)}｜表价合计 ¥${roundPrice(appraisal.sum)}｜净差 ${diffText}（±${appraisal.tolerance} 内推送）`);
+    if (priced.length) {
+      lines.push(`清单：${priced.map((part) => `${part.label}=${roundPrice(part.price)}`).join(" / ")}`);
+    }
+    if (unpriced.length) {
+      lines.push(`未计价：${unpriced.map((part) => part.label).join("、")}`);
+    }
+    if (appraisal.flags.length) {
+      lines.push(`提示：${appraisal.flags.slice(0, 5).join("；")}`);
+    }
+  } else {
+    lines.push(`【整机扫描】${listing.title}`);
+    lines.push(`卖家价 ¥${roundPrice(listing.price)}（估价引擎未启用）`);
+  }
+  lines.push(`商品链接: ${listing.url}`);
+  return lines.join("\n");
+}
+
 function isAccessBlockState(state) {
   return state === "waiting_for_verification" || state === "waiting_for_login";
 }
 
 export class MonitorService {
-  constructor({ database, browser, notifier, ai = null }) {
+  constructor({ database, browser, notifier, ai = null, appraiser = null }) {
     this.database = database;
     this.browser = browser;
     this.notifier = notifier;
     this.ai = ai;
+    this.appraiser = appraiser;
     this.running = false;
     this.startedAt = null;
     this.lastActivity = "监控尚未启动";
@@ -45,20 +75,36 @@ export class MonitorService {
     this.accessRecoveryState = "none";
     this.accessPauseNotified = false;
     this.manualRecoveryNoticeSent = false;
-    this.autoRecoveryStreak = 0;
-    this.lastAutoSwitchBrowser = "";
     this.recoveryReportPending = false;
     this.scanOperation = Promise.resolve();
     this.scanGeneration = 0;
     this.restartLoginPromise = null;
     // True while the user is expected to scan a QR code in the login window we opened.
     this.manualLoginMode = false;
+    // Human-like pacing state: window / interval / long breaks / daily caps / verification cooldown.
+    this.pacingCache = null;
+    this.pacingCacheAt = 0;
+    this.windowCache = null;
+    this.scansSinceBreak = 0;
+    this.breakTarget = 0;
+    this.dailyScans = new Map();
+    this.dailyScansDay = "";
+    this.verificationCooldownUntil = 0;
+    this.autoRecoveryAttempts = 0;
+    // 轮换：standard（用户的显卡等规则）与 machine（整机自动扫描）交替进行。
+    this.nextScanKind = "standard";
+    // 两类规则各自记录“上一条扫过的”，分组轮换才不会互相干扰。
+    this.lastStandardRuleId = null;
+    this.lastMachineRuleId = null;
   }
 
   status() {
     const paused = this.#isAccessPaused();
     const enabledRules = this.database.listRules().filter((rule) => rule.enabled);
     const nextRule = this.#nextRule(enabledRules);
+    const window = this.#todayWindow();
+    const withinWindow = this.#withinWindow();
+    const nextWindow = withinWindow ? null : this.#nextWindowStart();
     return {
       running: this.running,
       startedAt: this.startedAt,
@@ -72,7 +118,11 @@ export class MonitorService {
       enabledRuleCount: enabledRules.length,
       nextRuleId: nextRule?.id ?? null,
       nextRuleName: nextRule?.name ?? "",
-      lastScannedRuleId: this.lastScannedRuleId
+      lastScannedRuleId: this.lastScannedRuleId,
+      scanWindowLabel: `${minutesToTime(window.start)}–${minutesToTime(window.end)}`,
+      scanResting: !withinWindow,
+      nextWindowLabel: nextWindow ? `${nextWindow.tomorrow ? "明天" : "今天"} ${minutesToTime(nextWindow.minutes)}` : "",
+      observing: this.#observing()
     };
   }
 
@@ -82,9 +132,11 @@ export class MonitorService {
     }
     this.running = true;
     this.startedAt = Date.now();
+    this.#ensureMachineRules();
+    const pacing = this.#pacing();
     this.lastActivity = this.#isAccessPaused()
       ? this.#accessPauseMessage()
-      : "监控已启动，将按规则顺序查询；每条之间随机等待 45–75 秒。";
+      : `监控已启动：活跃时段 ${pacing.windowStart}–${pacing.windowEnd}，间隔随机 ${pacing.intervalMinSec}–${pacing.intervalMaxSec} 秒，每轮随机休息；每天每条上限 ${pacing.dailyLimit} 次。`;
     this.loopPromise = this.#runLoop();
     this.notificationTimer = setInterval(() => {
       this.notifier.processOne().catch(() => {});
@@ -140,6 +192,9 @@ export class MonitorService {
       return { scanned: false, reason, matched: 0, queued: 0 };
     }
 
+    // Count every scan attempt, even failed ones, so the daily cap cannot be bypassed by errors.
+    this.dailyScans.set(rule.id, this.#scanCount(rule.id) + 1);
+    this.autoRecoveryAttempts = 0;
     this.activeRuleId = rule.id;
     const generation = this.scanGeneration;
     this.lastActivity = `正在扫描：${rule.name}`;
@@ -147,8 +202,12 @@ export class MonitorService {
     const baseline = !rule.lastScannedAt;
     try {
       const listings = await this.browser.scan(rule);
-      this.autoRecoveryStreak = 0;
       this.manualLoginMode = false;
+      if (rule.kind === "machine") {
+        const summary = await this.#evaluateMachineListings(rule, listings, { baseline, generation });
+        await this.#reportRecoveryScan(`恢复后首次扫描完成。\n${this.lastActivity}`);
+        return summary;
+      }
       let matched = 0;
       let queued = 0;
       let alreadySeen = 0;
@@ -370,6 +429,7 @@ export class MonitorService {
   }
 
   async #completeAccessRecovery({ automatic = false } = {}) {
+    const recoveredKind = this.accessPauseKind;
     this.manualLoginMode = false;
     this.accessPaused = false;
     this.accessPauseKind = "";
@@ -377,6 +437,14 @@ export class MonitorService {
     this.accessPauseNotified = false;
     this.manualRecoveryNoticeSent = false;
     this.recoveryReportPending = true;
+    this.verificationCooldownUntil = 0;
+    this.autoRecoveryAttempts = 0;
+    if (recoveredKind === "verification") {
+      // Start the low-speed observation window after any verification event.
+      try {
+        this.database.setSetting("last_verification_at", String(Date.now()));
+      } catch { }
+    }
     this.lastActivity = this.running
       ? `${automatic ? "已自动确认闲鱼登录" : "已确认闲鱼登录"}，继续按规则顺序查询。`
       : "已确认闲鱼登录；监控仍处于停止状态。";
@@ -401,6 +469,14 @@ export class MonitorService {
         continue;
       }
 
+      if (!this.#withinWindow()) {
+        const window = this.#todayWindow();
+        const next = this.#nextWindowStart();
+        this.lastActivity = `非扫描时段（今日窗口 ${minutesToTime(window.start)}–${minutesToTime(window.end)}），休息中；${next.tomorrow ? "明天" : "今天"} ${minutesToTime(next.minutes)} 恢复查询。`;
+        await this.#waitForLoop(Math.min(this.#msUntilWindowStart(), 10 * 60_000));
+        continue;
+      }
+
       const rules = this.database.enabledRulesInOrder();
       if (!rules.length) {
         this.lastActivity = "没有已启用的规则，等待添加。";
@@ -408,13 +484,40 @@ export class MonitorService {
         continue;
       }
 
-      const rule = this.#nextRule(rules);
+      const observation = this.#observing();
+      const dailyLimit = Math.max(1, Math.floor(this.#pacing().dailyLimit * (observation ? 0.5 : 1)));
+      const scannable = rules.filter((rule) => this.#scanCount(rule.id) < dailyLimit);
+      if (!scannable.length) {
+        this.lastActivity = `今日查询已达上限（每条规则 ${dailyLimit} 次），今天不再扫描，明天继续。`;
+        await this.#waitForLoop(Math.min(this.#msUntilMidnight(), 10 * 60_000));
+        continue;
+      }
+
+      // 交替轮换：一个用户规则（显卡等）→ 一个整机自动扫描 → 循环。
+      const standards = scannable.filter((item) => item.kind !== "machine");
+      const machines = scannable.filter((item) => item.kind === "machine");
+      let rule;
+      if (this.nextScanKind === "machine" && machines.length) {
+        rule = this.#nextRule(machines, this.lastMachineRuleId);
+        this.nextScanKind = "standard";
+      } else if (standards.length) {
+        rule = this.#nextRule(standards, this.lastStandardRuleId);
+        this.nextScanKind = machines.length ? "machine" : "standard";
+      } else {
+        rule = this.#nextRule(machines, this.lastMachineRuleId);
+        this.nextScanKind = "standard";
+      }
       try {
         await this.scanRule(rule);
       } catch {
         // The failure is recorded on the rule; keep the rotation moving.
       } finally {
         this.lastScannedRuleId = rule.id;
+        if (rule.kind === "machine") {
+          this.lastMachineRuleId = rule.id;
+        } else {
+          this.lastStandardRuleId = rule.id;
+        }
       }
       await this.notifier.processOne();
       // Yield to the event loop so even instant failures cannot starve the process.
@@ -423,14 +526,30 @@ export class MonitorService {
         // Recovery and manual logins must react at once instead of waiting out the interval.
         continue;
       }
-      // One search roughly per minute; the random gap keeps the rhythm irregular.
-      await this.#waitForLoop(this.#nextScanDelay());
+
+      // Long pause after a run of scans so the rhythm is not a metronome.
+      const pacing = this.#pacing();
+      if (this.breakTarget <= 0) {
+        this.breakTarget = randomBetween(pacing.breakEveryMin, pacing.breakEveryMax);
+      }
+      this.scansSinceBreak += 1;
+      if (this.scansSinceBreak >= this.breakTarget) {
+        const scannedCount = this.scansSinceBreak;
+        this.scansSinceBreak = 0;
+        this.breakTarget = randomBetween(pacing.breakEveryMin, pacing.breakEveryMax);
+        const restMinutes = randomBetween(pacing.breakMinutesMin, pacing.breakMinutesMax);
+        this.lastActivity = `已连续查询 ${scannedCount} 次，随机休息 ${restMinutes} 分钟（模拟人工停顿）。`;
+        await this.#waitForLoop(restMinutes * 60_000);
+      } else {
+        await this.#waitForLoop(this.#nextScanDelay());
+      }
     }
   }
 
   #nextScanDelay() {
-    const range = SCAN_INTERVAL_MAX_MS - SCAN_INTERVAL_MIN_MS + 1;
-    return SCAN_INTERVAL_MIN_MS + Math.floor(Math.random() * range);
+    const pacing = this.#pacing();
+    const factor = this.#observing() ? 2 : 1;
+    return randomBetween(pacing.intervalMinSec * 1000 * factor, pacing.intervalMaxSec * 1000 * factor);
   }
 
   #waitForLoop(milliseconds) {
@@ -448,15 +567,159 @@ export class MonitorService {
     });
   }
 
-  #nextRule(rules) {
+  #nextRule(rules, lastId = this.lastScannedRuleId) {
     if (!rules.length) {
       return null;
     }
-    const index = rules.findIndex((rule) => rule.id === this.lastScannedRuleId);
+    const index = rules.findIndex((rule) => rule.id === lastId);
     if (index === -1) {
       return rules[0];
     }
     return rules[(index + 1) % rules.length];
+  }
+
+  #ensureMachineRules() {
+    const rules = this.database.listRules();
+    if (rules.some((rule) => rule.kind === "machine")) {
+      return;
+    }
+    const definitions = [
+      { name: "【自动】整机·主机台式机", keyword: "主机 台式机" },
+      { name: "【自动】整机·电脑整机", keyword: "电脑整机" }
+    ];
+    for (const definition of definitions) {
+      this.database.createRule({
+        name: definition.name,
+        category: "custom",
+        keyword: definition.keyword,
+        includeTerms: [],
+        excludeTerms: [],
+        minPriceCny: null,
+        maxPriceCny: 10_000,
+        personalOnly: false,
+        enabled: true,
+        kind: "machine"
+      });
+    }
+  }
+
+  async #evaluateMachineListings(rule, listings, { baseline, generation }) {
+    let hits = 0;
+    let queued = 0;
+    let alreadySeen = 0;
+    let blocked = 0;
+    let appraised = 0;
+    for (const listing of listings) {
+      if (generation !== this.scanGeneration) {
+        break;
+      }
+      if (this.database.isListingBlocked(listing.itemId)) {
+        blocked += 1;
+        continue;
+      }
+      if (this.database.hasListing(rule.id, listing.itemId)) {
+        alreadySeen += 1;
+        continue;
+      }
+      const appraisal = typeof this.appraiser?.appraise === "function"
+        ? this.appraiser.appraise(listing.title, listing.price)
+        : null;
+      appraised += 1;
+      const hit = Boolean(appraisal && appraisal.inWindow === true && appraisal.kind === "machine");
+      if (hit) {
+        hits += 1;
+      }
+      const result = this.database.recordCandidateListing(
+        rule,
+        listing,
+        listing.price,
+        !baseline && hit,
+        buildMachineMessage(listing, appraisal)
+      );
+      if (result.queued) {
+        queued += 1;
+      }
+    }
+    this.lastActivity = baseline
+      ? `已建立基线：${rule.name}，记录 ${listings.length} 个结果。`
+      : appraised
+        ? `扫描完成：${rule.name}，估价 ${appraised} 个，窗口命中 ${hits} 个，新增提醒 ${queued} 个${alreadySeen ? `，已见 ${alreadySeen} 个` : ""}${blocked ? `，已屏蔽 ${blocked} 个` : ""}。`
+        : `扫描完成：${rule.name}，没有新商品。`;
+    return { scanned: true, baseline, listings: listings.length, matched: hits, alreadySeen, queued, blocked };
+  }
+
+  #pacing() {
+    if (this.pacingCache && Date.now() - this.pacingCacheAt < 10_000) {
+      return this.pacingCache;
+    }
+    let stored = null;
+    try {
+      stored = JSON.parse(this.database.getSetting("scan_pacing") ?? "null");
+    } catch {
+      stored = null;
+    }
+    this.pacingCache = normalizeScanPacing(stored ?? {});
+    this.pacingCacheAt = Date.now();
+    return this.pacingCache;
+  }
+
+  #observing() {
+    const hours = this.#pacing().observationHours;
+    if (!hours) {
+      return false;
+    }
+    const last = Number(this.database.getSetting("last_verification_at") ?? 0);
+    return Number.isFinite(last) && last > 0 && Date.now() - last < hours * 3_600_000;
+  }
+
+  #todayWindow() {
+    const key = new Date().toDateString();
+    if (this.windowCache?.key === key) {
+      return this.windowCache;
+    }
+    const pacing = this.#pacing();
+    const jitter = randomBetween(-pacing.windowJitterMinutes, pacing.windowJitterMinutes);
+    const start = Math.min(1439, Math.max(0, parseTimeToMinutes(pacing.windowStart, 540) + jitter));
+    const end = Math.min(1439, Math.max(start + 30, parseTimeToMinutes(pacing.windowEnd, 1380) + jitter));
+    this.windowCache = { key, start, end };
+    return this.windowCache;
+  }
+
+  #withinWindow() {
+    const now = new Date();
+    const minutes = now.getHours() * 60 + now.getMinutes();
+    const window = this.#todayWindow();
+    return minutes >= window.start && minutes < window.end;
+  }
+
+  #nextWindowStart() {
+    const window = this.#todayWindow();
+    const now = new Date();
+    const minutes = now.getHours() * 60 + now.getMinutes();
+    return { minutes: window.start, tomorrow: minutes >= window.start };
+  }
+
+  #msUntilWindowStart() {
+    const window = this.#todayWindow();
+    const now = new Date();
+    const minutes = now.getHours() * 60 + now.getMinutes() + now.getSeconds() / 60;
+    const target = minutes < window.start ? window.start : 24 * 60 + window.start;
+    return Math.max(60_000, Math.round((target - minutes) * 60_000));
+  }
+
+  #msUntilMidnight() {
+    const now = new Date();
+    const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 1, 0);
+    return Math.max(60_000, midnight.getTime() - now.getTime());
+  }
+
+  #scanCount(ruleId) {
+    const day = new Date().toDateString();
+    if (this.dailyScansDay !== day) {
+      this.dailyScansDay = day;
+      this.dailyScans = new Map();
+    }
+    return this.dailyScans.get(ruleId) ?? 0;
   }
 
   #isAccessPaused() {
@@ -464,18 +727,7 @@ export class MonitorService {
   }
 
   #canAutoRecover() {
-    return this.autoRecoveryStreak < 2 && typeof this.browser?.openLogin === "function";
-  }
-
-  #canAutoSwitch() {
-    if (!this.#canAutoRecover()) {
-      return false;
-    }
-    if (typeof this.browser?.switchBrowser !== "function") {
-      return false;
-    }
-    const status = this.browser.status();
-    return Boolean(status.canSwitch && status.alternateBrowserName);
+    return this.autoRecoveryAttempts < 1 && typeof this.browser?.openLogin === "function";
   }
 
   async #pauseForAccess(kind) {
@@ -495,6 +747,10 @@ export class MonitorService {
       await this.#notifyAccessPause();
       return;
     }
+    this.autoRecoveryAttempts = 0;
+    this.verificationCooldownUntil = this.accessPauseKind === "verification"
+      ? Date.now() + this.#pacing().cooldownMinutes * 60_000
+      : 0;
     this.accessRecoveryState = "closing";
     this.lastActivity = this.#accessPauseMessage();
     if (typeof this.browser.close === "function") {
@@ -549,6 +805,10 @@ export class MonitorService {
         return;
       }
       if (this.accessRecoveryState === "closed") {
+        if (Date.now() < this.verificationCooldownUntil) {
+          this.lastActivity = this.#accessPauseMessage();
+          return;
+        }
         if (!this.#canAutoRecover()) {
           this.accessRecoveryState = "manual";
           await this.#notifyManualRecovery();
@@ -582,17 +842,7 @@ export class MonitorService {
       }
     }
     if (automatic) {
-      if (this.#canAutoSwitch()) {
-        try {
-          await this.browser.switchBrowser();
-        } catch {
-          this.accessRecoveryState = "switch_failed";
-          throw new Error("备用浏览器切换失败，请点击“重新登录”重试。");
-        }
-        this.lastAutoSwitchBrowser = this.browser.status().browserName;
-        this.lastActivity = `已自动切换到 ${this.lastAutoSwitchBrowser}，正在确认登录。`;
-      }
-      this.autoRecoveryStreak += 1;
+      this.autoRecoveryAttempts += 1;
     }
     this.accessRecoveryState = "opening";
     try {
@@ -631,9 +881,9 @@ export class MonitorService {
     this.accessPauseNotified = true;
     const followUp = this.manualLoginMode
       ? "登录窗口会保持打开，请直接在浏览器中扫码登录；确认有效后自动继续查询。"
-      : this.#canAutoSwitch()
-        ? `即将自动切换到 ${this.browser.status().alternateBrowserName} 并确认缓存登录；确认有效后自动继续查询，不会填写密码或处理验证码。`
-        : "将复用已缓存的登录资料；不会填写密码或处理验证码。";
+      : this.accessPauseKind === "verification"
+        ? `已进入冷却：${this.#pacing().cooldownMinutes} 分钟后自动尝试恢复一次（仅 1 次）；如果验证仍在，需要你人工完成（不会自动处理验证码）。`
+        : "将复用已缓存的登录资料打开登录窗口一次；确认有效后自动继续查询，不会填写密码或处理验证码。";
     await this.#sendStatusMessage(`${this.#accessPauseMessage()}${followUp}`);
   }
 
@@ -662,24 +912,23 @@ export class MonitorService {
     const prefix = this.accessPauseKind === "login"
       ? "闲鱼登录已失效，自动查询已暂停。"
       : "闲鱼要求访问验证，自动查询已暂停。";
-    const target = this.#canAutoSwitch() ? this.browser.status().alternateBrowserName : "";
     let action;
     switch (this.accessRecoveryState) {
       case "closing":
         action = "正在关闭旧窗口。";
         break;
       case "closed":
-        action = !this.running
-          ? "旧窗口已关闭，监控未启动；点击“打开登录”或“重新登录”即可继续。"
-          : target
-            ? `旧窗口已关闭，即将自动切换到 ${target} 并打开登录窗口；确认登录有效后会自动继续查询。`
-            : "旧窗口已关闭，即将自动打开登录窗口；确认登录有效后会自动继续查询。";
-        break;
-      case "switch_failed":
-        action = "备用浏览器切换失败，请点击“重新登录”重试。";
+        if (!this.running) {
+          action = "旧窗口已关闭，监控未启动；点击“打开登录”或“重新登录”即可继续。";
+        } else if (this.accessPauseKind === "verification" && Date.now() < this.verificationCooldownUntil) {
+          const waitMinutes = Math.max(1, Math.ceil((this.verificationCooldownUntil - Date.now()) / 60_000));
+          action = `验证冷却中：约 ${waitMinutes} 分钟后自动尝试恢复一次（仅 1 次）；若仍失败需要人工完成验证。`;
+        } else {
+          action = "即将自动打开登录窗口一次；确认登录有效后会自动继续查询。";
+        }
         break;
       case "manual":
-        action = "访问验证连续出现，已停止自动切换窗口；请点击“打开登录”人工完成验证，确认有效后会自动继续查询。";
+        action = "自动尝试已结束；请点击“打开登录”人工完成验证，确认有效后会自动继续查询。";
         break;
       case "opening":
         action = "正在打开登录窗口并确认登录。";

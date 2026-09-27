@@ -76,6 +76,108 @@
         </form>
       </section>
 
+      <section class="scan-pacing-section">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">HUMAN-LIKE PACING</p>
+            <h2>扫描节律</h2>
+          </div>
+          <span id="pacing-state" class="muted">-</span>
+        </div>
+        <form id="pacing-form" class="network-form">
+          <label>
+            <span>开始时间</span>
+            <input id="pacing-window-start" name="windowStart" type="time" required>
+          </label>
+          <label>
+            <span>结束时间</span>
+            <input id="pacing-window-end" name="windowEnd" type="time" required>
+          </label>
+          <label>
+            <span>最小间隔（秒）</span>
+            <input id="pacing-interval-min" name="intervalMinSec" type="number" min="30" max="3600" required>
+          </label>
+          <label>
+            <span>最大间隔（秒）</span>
+            <input id="pacing-interval-max" name="intervalMaxSec" type="number" min="30" max="7200" required>
+          </label>
+          <label>
+            <span>每日上限（次/规则）</span>
+            <input id="pacing-daily-limit" name="dailyLimit" type="number" min="1" max="2000" required>
+          </label>
+          <label>
+            <span>验证冷却（分钟）</span>
+            <input id="pacing-cooldown" name="cooldownMinutes" type="number" min="5" max="1440" required>
+          </label>
+          <button class="button primary" type="submit">保存节律设置</button>
+          <small class="muted">只在开始–结束时段内扫描（每天随机浮动 ±30 分钟），深夜自动休息；每次间隔随机，每轮随机小休；被验证后自动暂停并冷却，仅自动重试 1 次。</small>
+        </form>
+      </section>
+
+      <section class="appraisal-section">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">MACHINE APPRAISAL</p>
+            <h2>整机估价</h2>
+          </div>
+          <span id="appraisal-state" class="muted">-</span>
+        </div>
+
+        <form id="appraise-form" class="settings-form">
+          <label class="wide-field">
+            <span>商品标题 / 描述文字（粘贴闲鱼文案）</span>
+            <textarea id="appraise-text" name="text" maxlength="600" placeholder="例如：i5 12400F+RTX3060 12G 16G内存 512G固态 游戏主机 自用" required></textarea>
+          </label>
+          <label>
+            <span>卖家价（元，可留空）</span>
+            <input id="appraise-price" name="price" type="number" min="0" max="999999" step="0.01" placeholder="例如 2999">
+          </label>
+          <div class="inline-actions">
+            <button class="button primary" type="submit">立即估价</button>
+          </div>
+        </form>
+        <div id="appraise-result" class="appraise-result" aria-live="polite"></div>
+
+        <form id="appraisal-form" class="settings-form appraisal-params">
+          <label>
+            <span>整机差值窗口（±元）</span>
+            <input id="appraisal-tolerance-machine" name="toleranceMachine" type="number" min="0" max="100000" required>
+          </label>
+          <label>
+            <span>单件差值窗口（±元）</span>
+            <input id="appraisal-tolerance-single" name="toleranceSingle" type="number" min="0" max="100000" required>
+          </label>
+          <label>
+            <span>整机下限（元，低于不收）</span>
+            <input id="appraisal-min-sum" name="machineMinSum" type="number" min="0" max="1000000" required>
+          </label>
+          <label>
+            <span>整机上限（元，高于不收）</span>
+            <input id="appraisal-max-sum" name="machineMaxSum" type="number" min="0" max="1000000" required>
+          </label>
+          <label>
+            <span>非一线品牌折减（元）</span>
+            <input id="appraisal-brand-discount" name="otherBrandDiscount" type="number" min="0" max="500" required>
+          </label>
+          <div class="inline-actions">
+            <button class="button primary" type="submit">保存估价参数</button>
+          </div>
+        </form>
+
+        <div class="section-heading tables-heading">
+          <div>
+            <p class="eyebrow">PRICE TABLES</p>
+            <h2>回收价表（直接改数字，保存即生效）</h2>
+          </div>
+          <div class="inline-actions">
+            <button id="reload-tables" class="button" type="button">放弃修改并重载</button>
+            <button id="save-tables" class="button primary" type="button">保存价格表</button>
+          </div>
+        </div>
+        <p id="tables-state" class="muted">-</p>
+        <div id="price-tables" class="price-tables"></div>
+      </section>
+
       <section class="rules-section">
         <div class="section-heading">
           <div>

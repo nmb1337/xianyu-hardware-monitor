@@ -9,6 +9,8 @@ import { AstrBotNotifier, normalizeAstrBotBaseUrl, parseReceiverQqList } from ".
 import { AiReviewer, normalizeAiBaseUrl } from "./ai.js";
 import { XianyuBrowser, parseBrowserProxySetting } from "./browser.js";
 import { MonitorService } from "./monitor.js";
+import { normalizeScanPacing } from "./scan-pacing.js";
+import { Appraiser, normalizeAppraisal } from "./appraisal.js";
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const rootDirectory = resolve(sourceDirectory, "..");
@@ -261,6 +263,18 @@ async function routeApi(request, response, url, services) {
     if (aiModel.length > 120) {
       throw new Error("AI 模型名称不能超过 120 个字符");
     }
+    if (body.scanPacing !== undefined) {
+      if (body.scanPacing === null || typeof body.scanPacing !== "object" || Array.isArray(body.scanPacing)) {
+        throw new Error("扫描节律设置格式无效");
+      }
+      database.setSetting("scan_pacing", JSON.stringify(normalizeScanPacing(body.scanPacing)));
+    }
+    if (body.appraisal !== undefined) {
+      if (body.appraisal === null || typeof body.appraisal !== "object" || Array.isArray(body.appraisal)) {
+        throw new Error("估价设置格式无效");
+      }
+      database.setSetting("appraisal", JSON.stringify(normalizeAppraisal(body.appraisal)));
+    }
     const settings = database.updateSettings({
       astrbotBaseUrl: normalizeAstrBotBaseUrl(body.astrbotBaseUrl ?? currentSettings.astrbotBaseUrl),
       astrbotApiKey: body.astrbotApiKey,
@@ -330,6 +344,23 @@ async function routeApi(request, response, url, services) {
     return sendJson(response, 200, await monitor.resetBrowserProfile());
   }
 
+  if (method === "GET" && path === "/api/price-tables") {
+    return sendJson(response, 200, services.appraiser.tables({ force: true }));
+  }
+  if (method === "PUT" && path === "/api/price-tables") {
+    const body = await readJson(request);
+    return sendJson(response, 200, services.appraiser.updateTables(body));
+  }
+  if (method === "POST" && path === "/api/appraise") {
+    const body = await readJson(request);
+    const text = String(body.text ?? body.title ?? "").trim();
+    if (!text) {
+      throw new Error("请粘贴商品标题或描述文字");
+    }
+    const sellerPrice = Number(body.price);
+    return sendJson(response, 200, services.appraiser.appraise(text, Number.isFinite(sellerPrice) ? sellerPrice : null));
+  }
+
   sendJson(response, 404, { error: "未找到 API" });
 }
 
@@ -343,8 +374,9 @@ export function createApplication({ databasePath = resolve(dataDirectory, "monit
   });
   const notifier = new AstrBotNotifier(database);
   const ai = new AiReviewer(database);
-  const monitor = new MonitorService({ database, browser, notifier, ai });
-  const services = { database, browser, notifier, ai, monitor };
+  const appraiser = new Appraiser(database, { filePath: resolve(dataDirectory, "price-tables.json") });
+  const monitor = new MonitorService({ database, browser, notifier, ai, appraiser });
+  const services = { database, browser, notifier, ai, monitor, appraiser };
 
   const server = createServer(async (request, response) => {
     try {

@@ -448,6 +448,93 @@ td small {
   margin-top: 10px;
 }
 
+.appraise-result {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid #d4dce5;
+  background: #ffffff;
+  font-size: 13px;
+}
+
+.appraise-result:empty {
+  display: none;
+}
+
+.appraise-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.appraise-parts {
+  display: grid;
+  gap: 4px;
+  margin: 10px 0 0;
+  padding-left: 18px;
+}
+
+.appraise-parts small {
+  color: #6a7890;
+  margin-left: 6px;
+}
+
+.appraise-result p {
+  margin-top: 8px;
+}
+
+.appraisal-params {
+  margin-top: 14px;
+}
+
+.tables-heading {
+  margin-top: 20px;
+}
+
+.price-tables details {
+  margin-top: 10px;
+  border: 1px solid #d4dce5;
+  background: #ffffff;
+}
+
+.price-tables summary {
+  padding: 10px 12px;
+  color: #35455b;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.price-tables .table-wrap {
+  border: 0;
+  border-top: 1px solid #e2e7ed;
+}
+
+.price-tables td {
+  padding: 6px 10px;
+}
+
+.price-tables input[type="number"] {
+  min-height: 30px;
+}
+
+.price-tables .table-price {
+  max-width: 130px;
+}
+
+.price-tables tfoot td {
+  background: #f7f9fb;
+}
+
+.price-tables .check-label {
+  padding: 10px 12px;
+}
+
+.price-tables .cell-model small {
+  margin-top: 2px;
+  color: #6a7890;
+}
+
 
 .compact-list {
   min-height: 115px;

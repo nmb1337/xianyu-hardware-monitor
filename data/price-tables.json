@@ -1,0 +1,911 @@
+{
+  "version": 1,
+  "updatedAt": "2026-09-26",
+  "verified": false,
+  "notes": [
+    "所有价格 = 回收价（出货参考价），行情每天变动，请随时修改数字。",
+    "verified=false 表示该表尚未人工对照原图校对，估价结果会标注“待校对”。",
+    "low=true 的条目为低置信录入，必须优先校对。"
+  ],
+  "gpu": {
+    "source": "新鑫科技 · 二手显卡回收行情（一线品牌价）",
+    "verified": false,
+    "items": [
+      {
+        "model": "960",
+        "price": 180,
+        "vram": "2G"
+      },
+      {
+        "model": "960",
+        "price": 240,
+        "vram": "4G"
+      },
+      {
+        "model": "970",
+        "price": 230
+      },
+      {
+        "model": "1050",
+        "price": 230
+      },
+      {
+        "model": "1050",
+        "price": 430,
+        "suffix": "TI"
+      },
+      {
+        "model": "1060",
+        "price": 380,
+        "vram": "3G"
+      },
+      {
+        "model": "1060",
+        "price": 470,
+        "vram": "5G"
+      },
+      {
+        "model": "1060",
+        "price": 570,
+        "vram": "6G"
+      },
+      {
+        "model": "1070",
+        "price": 550
+      },
+      {
+        "model": "1070",
+        "price": 570,
+        "suffix": "TI"
+      },
+      {
+        "model": "1080",
+        "price": 600
+      },
+      {
+        "model": "1080",
+        "price": 750,
+        "suffix": "TI"
+      },
+      {
+        "model": "1650",
+        "price": 540
+      },
+      {
+        "model": "1650",
+        "price": 540,
+        "suffix": "S"
+      },
+      {
+        "model": "1660",
+        "price": 700
+      },
+      {
+        "model": "1660",
+        "price": 770,
+        "suffix": "S",
+        "note": "双风"
+      },
+      {
+        "model": "1660",
+        "price": 700,
+        "suffix": "TI"
+      },
+      {
+        "model": "2060",
+        "price": 900,
+        "vram": "6G"
+      },
+      {
+        "model": "2060",
+        "price": 1000,
+        "vram": "12G"
+      },
+      {
+        "model": "2060",
+        "price": 950,
+        "suffix": "S"
+      },
+      {
+        "model": "2070",
+        "price": 880
+      },
+      {
+        "model": "2070",
+        "price": 930,
+        "suffix": "S"
+      },
+      {
+        "model": "2080",
+        "price": 1000
+      },
+      {
+        "model": "2080",
+        "price": 1000,
+        "suffix": "S"
+      },
+      {
+        "model": "2080",
+        "price": 1100,
+        "suffix": "TI"
+      },
+      {
+        "model": "3050",
+        "price": 1200
+      },
+      {
+        "model": "3060",
+        "price": 1400,
+        "vram": "8G"
+      },
+      {
+        "model": "3060",
+        "price": 1750,
+        "vram": "12G"
+      },
+      {
+        "model": "3060",
+        "price": 1450,
+        "suffix": "TI"
+      },
+      {
+        "model": "3070",
+        "price": 1500
+      },
+      {
+        "model": "3070",
+        "price": 1650,
+        "suffix": "TI"
+      },
+      {
+        "model": "3080",
+        "price": 1900
+      },
+      {
+        "model": "3080",
+        "price": 2300,
+        "vram": "12G"
+      },
+      {
+        "model": "3080",
+        "price": 2600,
+        "suffix": "TI",
+        "vram": "12G"
+      },
+      {
+        "model": "4060",
+        "price": 2050,
+        "note": "箱说"
+      },
+      {
+        "model": "4060",
+        "price": 2300,
+        "suffix": "TI",
+        "note": "箱说"
+      },
+      {
+        "model": "4060",
+        "price": 3300,
+        "suffix": "TI",
+        "vram": "16G"
+      },
+      {
+        "model": "4070",
+        "price": 3300,
+        "note": "箱说"
+      },
+      {
+        "model": "4070",
+        "price": 3800,
+        "suffix": "S"
+      },
+      {
+        "model": "4070",
+        "price": 3800,
+        "suffix": "TI",
+        "note": "箱说"
+      },
+      {
+        "model": "4070",
+        "price": 5300,
+        "suffix": "TIS"
+      },
+      {
+        "model": "5060",
+        "price": 2550
+      },
+      {
+        "model": "5060",
+        "price": 2950,
+        "suffix": "TI",
+        "vram": "8G"
+      },
+      {
+        "model": "5060",
+        "price": 4200,
+        "suffix": "TI",
+        "vram": "16G"
+      },
+      {
+        "model": "5070",
+        "price": 5600
+      },
+      {
+        "model": "5070",
+        "price": 6800,
+        "suffix": "TI"
+      }
+    ],
+    "brandRule": {
+      "firstTier": [
+        "华硕",
+        "技嘉",
+        "微星",
+        "七彩虹",
+        "影驰"
+      ],
+      "otherBrandDiscountRange": [
+        10,
+        100
+      ]
+    }
+  },
+  "cpu": {
+    "source": "广州宏基科技 · AMD（锐龙 + 老平台）",
+    "verified": false,
+    "items": [
+      {
+        "model": "R3 1200",
+        "price": 20
+      },
+      {
+        "model": "R3 1300X",
+        "price": 20
+      },
+      {
+        "model": "R5 1400",
+        "price": 30
+      },
+      {
+        "model": "R5 1500",
+        "price": 30
+      },
+      {
+        "model": "R5 1500X",
+        "price": 40
+      },
+      {
+        "model": "R5 1600",
+        "price": 85
+      },
+      {
+        "model": "R5 1600X",
+        "price": 95,
+        "low": true
+      },
+      {
+        "model": "R7 1700",
+        "price": 150
+      },
+      {
+        "model": "R7 1700X",
+        "price": 100,
+        "low": true
+      },
+      {
+        "model": "R7 1800X",
+        "price": 140,
+        "low": true
+      },
+      {
+        "model": "R3 2200G",
+        "price": 70,
+        "low": true
+      },
+      {
+        "model": "R5 2400G",
+        "price": 190,
+        "low": true
+      },
+      {
+        "model": "R5 2600",
+        "price": 175,
+        "low": true
+      },
+      {
+        "model": "R5 2600X",
+        "price": 185,
+        "low": true
+      },
+      {
+        "model": "R7 2700",
+        "price": 250,
+        "low": true
+      },
+      {
+        "model": "R7 2700X",
+        "price": 260,
+        "low": true
+      },
+      {
+        "model": "速龙3000G",
+        "price": 50,
+        "low": true
+      },
+      {
+        "model": "R3 3100",
+        "price": 110,
+        "low": true
+      },
+      {
+        "model": "R3 3200G",
+        "price": 190,
+        "low": true
+      },
+      {
+        "model": "R5 3400G",
+        "price": 300,
+        "low": true
+      },
+      {
+        "model": "R3 3500X",
+        "price": 240,
+        "low": true
+      },
+      {
+        "model": "R5 3600",
+        "price": 330,
+        "low": true
+      },
+      {
+        "model": "R5 3600X",
+        "price": 345,
+        "low": true
+      },
+      {
+        "model": "R7 3700X",
+        "price": 455,
+        "low": true
+      },
+      {
+        "model": "R7 3800X",
+        "price": 460,
+        "low": true
+      },
+      {
+        "model": "R9 3900X",
+        "price": 660,
+        "low": true
+      },
+      {
+        "model": "R9 3950X",
+        "price": 800,
+        "low": true
+      },
+      {
+        "model": "R5 4500",
+        "price": 260,
+        "low": true
+      },
+      {
+        "model": "R5 4600G",
+        "price": 270,
+        "low": true
+      },
+      {
+        "model": "R5 4650G",
+        "price": 350,
+        "low": true
+      },
+      {
+        "model": "R7 4750G",
+        "price": 370,
+        "low": true
+      },
+      {
+        "model": "R5 5500",
+        "price": 365,
+        "low": true
+      },
+      {
+        "model": "R5 5600",
+        "price": 370,
+        "low": true
+      },
+      {
+        "model": "R5 5600X",
+        "price": 530,
+        "low": true
+      },
+      {
+        "model": "R5 5600G",
+        "price": 670,
+        "low": true
+      },
+      {
+        "model": "R7 5700X",
+        "price": 700,
+        "low": true
+      },
+      {
+        "model": "R7 5700G",
+        "price": 830,
+        "low": true
+      },
+      {
+        "model": "R7 5800X",
+        "price": 770,
+        "low": true
+      },
+      {
+        "model": "R9 5900X",
+        "price": 1200,
+        "low": true
+      },
+      {
+        "model": "R9 5950X",
+        "price": 1500,
+        "low": true
+      },
+      {
+        "model": "R5 7500F",
+        "price": 480,
+        "low": true
+      },
+      {
+        "model": "R5 7600",
+        "price": 540,
+        "low": true
+      },
+      {
+        "model": "R5 7600X",
+        "price": 570,
+        "low": true
+      },
+      {
+        "model": "R7 7700",
+        "price": 750,
+        "low": true
+      },
+      {
+        "model": "R7 7800X3D",
+        "price": 1420,
+        "low": true
+      },
+      {
+        "model": "R9 7900",
+        "price": 1080,
+        "low": true
+      },
+      {
+        "model": "R9 7900X",
+        "price": 1080,
+        "low": true
+      },
+      {
+        "model": "R9 7950X",
+        "price": 1350,
+        "low": true
+      },
+      {
+        "model": "R5 9600X",
+        "price": 810,
+        "low": true
+      },
+      {
+        "model": "R7 9700X",
+        "price": 1370,
+        "low": true
+      },
+      {
+        "model": "R7 9800X3D",
+        "price": 2110,
+        "low": true
+      },
+      {
+        "model": "R9 9900X",
+        "price": 1670,
+        "low": true
+      },
+      {
+        "model": "R9 7900X3D",
+        "price": 1080,
+        "low": true
+      },
+      {
+        "model": "R9 9950X",
+        "price": 2250,
+        "low": true
+      },
+      {
+        "model": "R9 9950X3D",
+        "price": 3250,
+        "low": true
+      },
+      {
+        "model": "A8 5500",
+        "price": 10
+      },
+      {
+        "model": "A8 5600",
+        "price": 10
+      },
+      {
+        "model": "A8 7650",
+        "price": 25,
+        "low": true
+      },
+      {
+        "model": "A8 7680",
+        "price": 25,
+        "low": true
+      },
+      {
+        "model": "A10 5700",
+        "price": 15,
+        "low": true
+      },
+      {
+        "model": "A10 5800",
+        "price": 15,
+        "low": true
+      },
+      {
+        "model": "A10 6700",
+        "price": 25,
+        "low": true
+      },
+      {
+        "model": "A10 6800",
+        "price": 25,
+        "low": true
+      },
+      {
+        "model": "A10 7860K",
+        "price": 30,
+        "low": true
+      },
+      {
+        "model": "A10 8850",
+        "price": 40,
+        "low": true
+      },
+      {
+        "model": "X4 640",
+        "price": 10,
+        "low": true
+      },
+      {
+        "model": "X4 645",
+        "price": 10,
+        "low": true
+      },
+      {
+        "model": "X4 955",
+        "price": 10,
+        "low": true
+      },
+      {
+        "model": "X4 965",
+        "price": 10,
+        "low": true
+      },
+      {
+        "model": "A8 6500",
+        "price": 10,
+        "low": true
+      },
+      {
+        "model": "A8 6600",
+        "price": 10,
+        "low": true
+      },
+      {
+        "model": "A8 7500",
+        "price": 10,
+        "low": true
+      },
+      {
+        "model": "A8 7600",
+        "price": 10,
+        "low": true
+      },
+      {
+        "model": "FX 6300",
+        "price": 25
+      },
+      {
+        "model": "FX 8320",
+        "price": 40,
+        "low": true
+      },
+      {
+        "model": "FX 8340",
+        "price": 40,
+        "low": true
+      },
+      {
+        "model": "FX 8350",
+        "price": 80
+      },
+      {
+        "model": "FX 8370",
+        "price": 130,
+        "low": true
+      }
+    ]
+  },
+  "intelCpu": {
+    "source": "深圳明泰 · Intel 各代",
+    "verified": false,
+    "note": "12/13/14代已录入（低置信待校对）；2~11代、G系列、部分T系列待录",
+    "columns": [
+      "2/3代",
+      "4代",
+      "6代",
+      "7代",
+      "8代",
+      "9代",
+      "10代",
+      "11代",
+      "12代",
+      "13代",
+      "14代",
+      "G系列"
+    ],
+    "items": [
+      {
+        "model": "i3-12100F",
+        "price": 460,
+        "low": true
+      },
+      {
+        "model": "i3-12100",
+        "price": 650,
+        "low": true
+      },
+      {
+        "model": "i5-12400F",
+        "price": 680,
+        "low": true
+      },
+      {
+        "model": "i5-12400",
+        "price": 675,
+        "low": true
+      },
+      {
+        "model": "i5-12490F",
+        "price": 675,
+        "low": true
+      },
+      {
+        "model": "i5-12500",
+        "price": 1145,
+        "low": true
+      },
+      {
+        "model": "i5-12600",
+        "price": 1050,
+        "low": true
+      },
+      {
+        "model": "i5-12600KF",
+        "price": 800,
+        "low": true
+      },
+      {
+        "model": "i5-12600K",
+        "price": 800,
+        "low": true
+      },
+      {
+        "model": "i7-12700F",
+        "price": 1250,
+        "low": true
+      },
+      {
+        "model": "i7-12700",
+        "price": 1530,
+        "low": true
+      },
+      {
+        "model": "i7-12700KF",
+        "price": 1240,
+        "low": true
+      },
+      {
+        "model": "i7-12700K",
+        "price": 1530,
+        "low": true
+      },
+      {
+        "model": "i9-12900KF",
+        "price": 1870,
+        "low": true
+      },
+      {
+        "model": "i9-12900F",
+        "price": 1850,
+        "low": true
+      },
+      {
+        "model": "i9-12900",
+        "price": 2060,
+        "low": true
+      },
+      {
+        "model": "i9-12900KS",
+        "price": 1800,
+        "low": true
+      },
+      {
+        "model": "i9-12900K",
+        "price": 2480,
+        "low": true
+      },
+      {
+        "model": "i3-12100T",
+        "price": 430,
+        "low": true
+      },
+      {
+        "model": "i3-12300T",
+        "price": 450,
+        "low": true
+      },
+      {
+        "model": "i5-12400T",
+        "price": 700,
+        "low": true
+      },
+      {
+        "model": "i5-12500T",
+        "price": 800,
+        "low": true
+      },
+      {
+        "model": "i3-13100F",
+        "price": 470,
+        "low": true
+      },
+      {
+        "model": "i3-13100",
+        "price": 625,
+        "low": true
+      },
+      {
+        "model": "i5-13400F",
+        "price": 730,
+        "low": true
+      },
+      {
+        "model": "i5-13400",
+        "price": 840,
+        "low": true
+      },
+      {
+        "model": "i5-13500",
+        "price": 1235,
+        "low": true
+      },
+      {
+        "model": "i7-13700F",
+        "price": 1450,
+        "low": true
+      },
+      {
+        "model": "i3-14100F",
+        "price": 515,
+        "low": true
+      },
+      {
+        "model": "i3-14100",
+        "price": 630,
+        "low": true
+      },
+      {
+        "model": "i5-14400F",
+        "price": 810,
+        "low": true
+      },
+      {
+        "model": "i5-14490F",
+        "price": 910,
+        "low": true
+      },
+      {
+        "model": "i5-14500",
+        "price": 1280,
+        "low": true
+      },
+      {
+        "model": "i5-14600KF",
+        "price": 1190,
+        "low": true
+      },
+      {
+        "model": "i7-14700F",
+        "price": 1300,
+        "low": true
+      },
+      {
+        "model": "i7-14700",
+        "price": 1800,
+        "low": true
+      },
+      {
+        "model": "i7-14790F",
+        "price": 1720,
+        "low": true
+      },
+      {
+        "model": "i7-14700K",
+        "price": 1830,
+        "low": true
+      },
+      {
+        "model": "i9-14900",
+        "price": 2510,
+        "low": true
+      },
+      {
+        "model": "i9-14900F",
+        "price": 2480,
+        "low": true
+      },
+      {
+        "model": "i9-14900K",
+        "price": 2460,
+        "low": true
+      }
+    ]
+  },
+  "xeon": {
+    "source": "深圳明泰 · E3/E5 至强",
+    "verified": false,
+    "pending": true,
+    "items": []
+  },
+  "memory": {
+    "source": "广州宏基科技 · 内存（全品牌）",
+    "verified": false,
+    "note": "按 DDR代数 × 容量 × 品牌 × 台式/笔记本/服务器 分档；以下为抽查值，待逐格校对补录",
+    "desktop": [
+      {
+        "model": "DDR4 8G",
+        "price": 150,
+        "low": true
+      },
+      {
+        "model": "DDR4 16G",
+        "price": 330,
+        "low": true
+      },
+      {
+        "model": "DDR4 4G",
+        "price": 55,
+        "low": true
+      },
+      {
+        "model": "DDR5 16G",
+        "price": 210,
+        "low": true
+      },
+      {
+        "model": "DDR5 8G",
+        "price": 110,
+        "low": true
+      }
+    ],
+    "laptop": [],
+    "server": []
+  },
+  "storage": {
+    "source": "深圳明泰 · 回收SATA固态",
+    "verified": false,
+    "pending": true,
+    "note": "表内为SATA固态（三星等）；NVMe不在表中，按“表外件”处理不计价",
+    "items": []
+  }
+}

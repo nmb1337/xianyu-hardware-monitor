@@ -10,6 +10,10 @@ const state = {
   aiSettingsDirty: false,
   aiSettingsRevision: 0,
   browserNetworkDirty: false,
+  astrbotSettingsDirty: false,
+  pacingDirty: false,
+  appraisalDirty: false,
+  priceTables: null,
   savingAiSettings: false
 };
 
@@ -112,11 +116,14 @@ function renderStatus(status) {
         : "已停止";
   $("#activity-message").textContent = status.lastActivity || "-";
   const nextRule = status.nextRuleName ? `下一条：${status.nextRuleName}` : "暂无已启用规则";
+  const pacingLabel = status.scanWindowLabel ? `时段 ${status.scanWindowLabel}` : "";
   $("#search-schedule").textContent = status.accessPaused
-    ? "自动查询已暂停，正在等待登录恢复"
+    ? "自动查询已暂停（验证冷却或等待登录恢复）"
     : !status.running
-      ? `自动查询未启动；启动后按规则顺序查询（${nextRule}）`
-      : `按规则顺序查询（${status.enabledRuleCount ?? 0} 条，每条间隔随机 45–75 秒）；${nextRule}`;
+      ? `自动查询未启动；启动后按节律查询（${pacingLabel}）`
+      : status.scanResting
+        ? `非扫描时段休息中（${pacingLabel}）${status.nextWindowLabel ? `；${status.nextWindowLabel} 继续` : ""}`
+        : `按节律查询（${status.enabledRuleCount ?? 0} 条）；${pacingLabel}${status.observing ? "；低速观察期" : ""}；${nextRule}`;
   const resumeButton = $("#resume-monitor");
   const recoveryBusy = ["closing", "opening"].includes(status.recoveryState);
   resumeButton.disabled = !status.accessPaused || recoveryBusy || resumeButton.dataset.loading === "true";
@@ -134,7 +141,11 @@ function renderStatus(status) {
   $("#access-recovery").textContent = status.accessPaused ? status.lastActivity
     : browser.state === "verified" ? "会话已验证，无待处理恢复任务"
       : browser.message || "尚未验证闲鱼会话";
-  $("#search-frequency").textContent = "按规则顺序查询，每条之间随机等待 45–75 秒（平均约 1 分钟一条）";
+  $("#search-frequency").textContent = "仅活跃时段扫描，间隔随机，每轮随机小休；深夜自动休息。";
+  const pacingState = $("#pacing-state");
+  if (pacingState) {
+    pacingState.textContent = status.observing ? "低速观察期（验证恢复后 24 小时）" : "正常节律";
+  }
 }
 
 function renderRules(rules) {
@@ -291,6 +302,209 @@ function renderNotifications(notifications) {
     .join("");
 }
 
+const PRICE_TABLE_SECTIONS = [
+  { key: "gpu", list: "items", title: "显卡（表1 · 新鑫）" },
+  { key: "cpu", list: "items", title: "AMD CPU（锐龙 + 老平台）" },
+  { key: "intelCpu", list: "items", title: "Intel CPU（表3 · 明泰）" },
+  { key: "memory", list: "desktop", title: "台式机内存（表2）" },
+  { key: "memory", list: "laptop", title: "笔记本内存" },
+  { key: "memory", list: "server", title: "服务器内存" },
+  { key: "storage", list: "items", title: "固态硬盘（表3 · SATA档）" },
+  { key: "xeon", list: "items", title: "至强 E5 / E3" }
+];
+
+function parseGpuModelInput(value) {
+  const text = String(value ?? "").toUpperCase().replace(/\s+/g, " ").trim();
+  const match = text.match(/^(\d{3,4})\s?(TIS|TI\s?SUPER|TI|S)?\s?(\d{1,2}\s?G)?$/);
+  if (!match) {
+    return null;
+  }
+  const item = { model: match[1] };
+  let suffix = (match[2] ?? "").replace(/\s+/g, "");
+  if (suffix) {
+    item.suffix = suffix === "TISUPER" ? "TIS" : suffix;
+  }
+  if (match[3]) {
+    item.vram = match[3].replace(/\s+/g, "").toUpperCase();
+  }
+  return item;
+}
+
+function renderPriceTables() {
+  const container = $("#price-tables");
+  if (!container) {
+    return;
+  }
+  const tables = state.priceTables;
+  if (!tables) {
+    container.innerHTML = '<p class="empty">价格表加载中…</p>';
+    return;
+  }
+  const seenKeys = new Set();
+  container.innerHTML = PRICE_TABLE_SECTIONS.map((def, sectionIndex) => {
+    const table = tables[def.key] ?? {};
+    const items = Array.isArray(table[def.list]) ? table[def.list] : [];
+    const showVerified = !seenKeys.has(def.key);
+    seenKeys.add(def.key);
+    const rows = items.map((item, index) => {
+      const suffix = item.suffix ? String(item.suffix) : "";
+      const vram = item.vram ? String(item.vram) : "";
+      const label = `${String(item.model ?? "")}${suffix}${vram ? ` ${vram}` : ""}`;
+      const attrs = [
+        `data-index="${index}"`,
+        `data-model="${escapeHtml(String(item.model ?? ""))}"`,
+        suffix ? `data-suffix="${escapeHtml(suffix)}"` : "",
+        vram ? `data-vram="${escapeHtml(vram)}"` : "",
+        item.low ? 'data-low="1"' : "",
+        item.note ? `data-note="${escapeHtml(String(item.note))}"` : ""
+      ].filter(Boolean).join(" ");
+      return `
+        <tr ${attrs}>
+          <td class="cell-model">${escapeHtml(label)}${item.low ? ` <span class="tag pending">低置信</span>` : ""}${item.note ? `<small>${escapeHtml(String(item.note))}</small>` : ""}</td>
+          <td><input class="table-price" data-role="price" type="number" min="0" step="1" value="${Number(item.price ?? 0)}"></td>
+          <td><button class="button" type="button" data-action="remove-row">删除</button></td>
+        </tr>`;
+    }).join("");
+    return `
+      <details class="price-table" data-section="${sectionIndex}">
+        <summary>${escapeHtml(def.title)} · ${items.length} 条${table.verified === true ? " ✓已校对" : "（待校对）"}</summary>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>型号</th><th>价格（元）</th><th></th></tr></thead>
+            <tbody>${rows}</tbody>
+            <tfoot>
+              <tr>
+                <td><input data-role="new-model" maxlength="40" placeholder="新增型号，例如 4070S / i5-13400F"></td>
+                <td><input data-role="new-price" type="number" min="0" step="1" placeholder="价格"></td>
+                <td><button class="button" type="button" data-action="add-row">添加</button></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+        ${showVerified ? `<label class="check-label"><input data-role="verified" type="checkbox"${table.verified === true ? " checked" : ""}><span>已对照原图校对过这张表</span></label>` : ""}
+      </details>`;
+  }).join("");
+  const stateLabel = $("#tables-state");
+  if (stateLabel) {
+    stateLabel.textContent = `价格表日期：${tables.updatedAt || "-"}；改完点“保存价格表”立即生效（行情变了随时改）。`;
+  }
+}
+
+async function loadPriceTables() {
+  state.priceTables = await request("/api/price-tables");
+  renderPriceTables();
+}
+
+async function savePriceTables(button) {
+  if (!state.priceTables) {
+    toast("价格表尚未加载完成", true);
+    return;
+  }
+  const payload = JSON.parse(JSON.stringify(state.priceTables));
+  for (const details of document.querySelectorAll("#price-tables details.price-table")) {
+    const def = PRICE_TABLE_SECTIONS[Number(details.dataset.section)];
+    if (!def) {
+      continue;
+    }
+    const target = payload[def.key] ?? (payload[def.key] = {});
+    const items = [];
+    for (const row of details.querySelectorAll("tbody tr")) {
+      const price = Number(row.querySelector('[data-role="price"]')?.value);
+      if (!Number.isFinite(price) || price < 0) {
+        continue;
+      }
+      let item = { model: row.dataset.model ?? "" };
+      if (row.dataset.suffix) {
+        item.suffix = row.dataset.suffix;
+      }
+      if (row.dataset.vram) {
+        item.vram = row.dataset.vram;
+      }
+      if (def.key === "gpu" && !row.dataset.suffix && !row.dataset.vram) {
+        // 通过页面新增的显卡行（如“4070S”）拆成 型号+后缀 存表，估价引擎才能匹配。
+        const parsed = parseGpuModelInput(item.model);
+        if (parsed) {
+          item = parsed;
+        }
+      }
+      if (!item.model) {
+        continue;
+      }
+      if (row.dataset.low === "1") {
+        item.low = true;
+      }
+      if (row.dataset.note) {
+        item.note = row.dataset.note;
+      }
+      item.price = price;
+      items.push(item);
+    }
+    target[def.list] = items;
+    const verifiedBox = details.querySelector('[data-role="verified"]');
+    if (verifiedBox) {
+      target.verified = verifiedBox.checked;
+    }
+  }
+  if (button) {
+    setButtonLoading(button, true);
+  }
+  try {
+    state.priceTables = await request("/api/price-tables", {
+      method: "PUT",
+      body: JSON.stringify(payload)
+    });
+    renderPriceTables();
+    toast("价格表已保存并立即生效。");
+  } catch (error) {
+    toast(error.message || "价格表保存失败", true);
+  } finally {
+    if (button) {
+      setButtonLoading(button, false);
+    }
+  }
+}
+
+function renderAppraiseResult(result) {
+  const container = $("#appraise-result");
+  if (!container) {
+    return;
+  }
+  const kindLabel = result.kind === "machine" ? "整机" : "单件";
+  let verdict = "未命中（差值超出窗口）";
+  let tagClass = "";
+  if (result.sum <= 0) {
+    verdict = "无法估价（没有查到表内价格）";
+  } else if (result.inWindow === true) {
+    verdict = "✓ 命中，会推送";
+    tagClass = "on";
+  } else if (result.machineRange && result.machineRange.ok === false) {
+    verdict = `超出收购范围（${result.machineRange.min}~${result.machineRange.max} 元），不收`;
+    tagClass = "pending";
+  }
+  const diffText = result.diff === null
+    ? "—"
+    : `${result.diff > 0 ? "+" : ""}${formatCurrency(result.diff)}`;
+  const partsRows = result.parts.map((part) => `
+    <li>
+      <strong>${escapeHtml(part.label)}</strong>
+      ${part.price > 0 ? formatCurrency(part.price) : '<span class="muted">未计价</span>'}
+      ${part.notes?.length ? `<small>${escapeHtml(part.notes.join(" / "))}</small>` : ""}
+    </li>`).join("");
+  container.innerHTML = `
+    <div class="appraise-summary">
+      <span class="tag ${tagClass}">${verdict}</span>
+      <strong>${kindLabel}｜表价合计 ${formatCurrency(result.sum)}</strong>
+      ${result.sellerPrice !== null ? `<span>卖家价 ${formatCurrency(result.sellerPrice)}</span>` : ""}
+      ${result.diff !== null ? `<span>净差 ${diffText}</span>` : ""}
+      ${result.windowLow !== null ? `<span class="muted">对比窗口 ${formatCurrency(result.windowLow)} ~ ${formatCurrency(result.windowHigh)}</span>` : ""}
+    </div>
+    ${partsRows ? `<ul class="appraise-parts">${partsRows}</ul>` : ""}
+    ${result.missing.length ? `<p class="muted">未计价：${escapeHtml(result.missing.join("、"))}</p>` : ""}
+    ${result.excluded.length ? `<p class="muted">不计入：${escapeHtml([...new Set(result.excluded)].join("、"))}</p>` : ""}
+    ${result.flags.length ? `<p class="muted">提示：${escapeHtml(result.flags.join("；"))}</p>` : ""}
+  `;
+}
+
 async function refresh() {
   const aiRevision = state.aiSettingsRevision;
   const [status, rules, listings, blockedListings, notifications, settings, aiRejections] = await Promise.all([
@@ -309,14 +523,38 @@ async function refresh() {
   renderBlockedListings(blockedListings);
   renderNotifications(notifications);
   renderAiRejections(aiRejections);
-  if (document.activeElement !== $("#astrbot-base-url")) {
-    $("#astrbot-base-url").value = settings.astrbotBaseUrl || "http://127.0.0.1:6185";
+  // The 5s poll must not wipe unsaved edits in the QQ alert form.
+  if (!state.astrbotSettingsDirty) {
+    if (document.activeElement !== $("#astrbot-base-url")) {
+      $("#astrbot-base-url").value = settings.astrbotBaseUrl || "http://127.0.0.1:6185";
+    }
+    if (document.activeElement !== $("#astrbot-bot-id")) {
+      $("#astrbot-bot-id").value = settings.astrbotBotId || "";
+    }
+    if (document.activeElement !== $("#astrbot-qq")) {
+      $("#astrbot-qq").value = settings.astrbotReceiverQq || "";
+    }
   }
-  if (document.activeElement !== $("#astrbot-bot-id")) {
-    $("#astrbot-bot-id").value = settings.astrbotBotId || "";
+  if (!state.pacingDirty) {
+    const pacing = settings.scanPacing ?? {};
+    $("#pacing-window-start").value = pacing.windowStart || "09:00";
+    $("#pacing-window-end").value = pacing.windowEnd || "23:00";
+    $("#pacing-interval-min").value = String(pacing.intervalMinSec ?? 120);
+    $("#pacing-interval-max").value = String(pacing.intervalMaxSec ?? 300);
+    $("#pacing-daily-limit").value = String(pacing.dailyLimit ?? 120);
+    $("#pacing-cooldown").value = String(pacing.cooldownMinutes ?? 120);
   }
-  if (document.activeElement !== $("#astrbot-qq")) {
-    $("#astrbot-qq").value = settings.astrbotReceiverQq || "";
+  if (!state.appraisalDirty) {
+    const appraisal = settings.appraisal ?? {};
+    $("#appraisal-tolerance-machine").value = String(appraisal.toleranceMachine ?? 550);
+    $("#appraisal-tolerance-single").value = String(appraisal.toleranceSingle ?? 550);
+    $("#appraisal-min-sum").value = String(appraisal.machineMinSum ?? 1300);
+    $("#appraisal-max-sum").value = String(appraisal.machineMaxSum ?? 7000);
+    $("#appraisal-brand-discount").value = String(appraisal.otherBrandDiscount ?? 50);
+    const label = $("#appraisal-state");
+    if (label) {
+      label.textContent = `窗口 ±${appraisal.toleranceMachine ?? 550} 元｜收购范围 ${appraisal.machineMinSum ?? 1300}~${appraisal.machineMaxSum ?? 7000} 元`;
+    }
   }
   // Never overwrite a network choice the user is still editing: the 5s poll must
   // not reset the dropdown (it used to also disable the proxy address input).
@@ -557,6 +795,10 @@ async function bootstrap() {
     });
   });
 
+  $("#settings-form").addEventListener("input", () => {
+    state.astrbotSettingsDirty = true;
+  });
+
   $("#settings-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const button = event.submitter;
@@ -571,9 +813,127 @@ async function bootstrap() {
           astrbotReceiverQq: form.get("astrbotReceiverQq")
         })
       });
+      state.astrbotSettingsDirty = false;
       $("#astrbot-api-key").value = "";
       toast("QQ 提醒设置已保存。");
     });
+  });
+
+  $("#pacing-form").addEventListener("input", () => {
+    state.pacingDirty = true;
+  });
+
+  $("#pacing-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await withAction(event.submitter, async () => {
+      await request("/api/settings", {
+        method: "PUT",
+        body: JSON.stringify({
+          scanPacing: {
+            windowStart: $("#pacing-window-start").value,
+            windowEnd: $("#pacing-window-end").value,
+            intervalMinSec: Number($("#pacing-interval-min").value),
+            intervalMaxSec: Number($("#pacing-interval-max").value),
+            dailyLimit: Number($("#pacing-daily-limit").value),
+            cooldownMinutes: Number($("#pacing-cooldown").value)
+          }
+        })
+      });
+      state.pacingDirty = false;
+      toast("扫描节律已保存。");
+    });
+  });
+
+  $("#appraise-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = event.submitter;
+    const text = $("#appraise-text").value.trim();
+    if (!text) {
+      toast("请先粘贴商品标题或描述", true);
+      return;
+    }
+    const rawPrice = Number($("#appraise-price").value);
+    setButtonLoading(button, true);
+    try {
+      const result = await request("/api/appraise", {
+        method: "POST",
+        body: JSON.stringify({
+          text,
+          price: Number.isFinite(rawPrice) && rawPrice > 0 ? rawPrice : null
+        })
+      });
+      renderAppraiseResult(result);
+    } catch (error) {
+      toast(error.message || "估价失败", true);
+    } finally {
+      setButtonLoading(button, false);
+    }
+  });
+
+  $("#appraisal-form").addEventListener("input", () => {
+    state.appraisalDirty = true;
+  });
+
+  $("#appraisal-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await withAction(event.submitter, async () => {
+      await request("/api/settings", {
+        method: "PUT",
+        body: JSON.stringify({
+          appraisal: {
+            toleranceMachine: Number($("#appraisal-tolerance-machine").value),
+            toleranceSingle: Number($("#appraisal-tolerance-single").value),
+            machineMinSum: Number($("#appraisal-min-sum").value),
+            machineMaxSum: Number($("#appraisal-max-sum").value),
+            otherBrandDiscount: Number($("#appraisal-brand-discount").value)
+          }
+        })
+      });
+      state.appraisalDirty = false;
+      toast("估价参数已保存。");
+    });
+  });
+
+  $("#save-tables").addEventListener("click", (event) => savePriceTables(event.currentTarget));
+  $("#reload-tables").addEventListener("click", (event) =>
+    withAction(event.currentTarget, async () => {
+      await loadPriceTables();
+      toast("已重新加载价格表。");
+    })
+  );
+  $("#price-tables").addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-action]");
+    if (!button) {
+      return;
+    }
+    const details = button.closest("details.price-table");
+    if (!details) {
+      return;
+    }
+    if (button.dataset.action === "add-row") {
+      const modelInput = details.querySelector('[data-role="new-model"]');
+      const priceInput = details.querySelector('[data-role="new-price"]');
+      const model = modelInput.value.trim();
+      const price = Number(priceInput.value);
+      if (!model || !Number.isFinite(price) || price < 0) {
+        toast("请填写型号和正确的价格", true);
+        return;
+      }
+      const row = document.createElement("tr");
+      row.dataset.model = model;
+      row.innerHTML = `
+        <td class="cell-model">${escapeHtml(model)} <span class="tag pending">新增</span></td>
+        <td><input class="table-price" data-role="price" type="number" min="0" step="1" value="${price}"></td>
+        <td><button class="button" type="button" data-action="remove-row">删除</button></td>`;
+      details.querySelector("tbody").appendChild(row);
+      modelInput.value = "";
+      priceInput.value = "";
+      toast("已添加一行，记得点“保存价格表”。");
+      return;
+    }
+    if (button.dataset.action === "remove-row") {
+      button.closest("tr")?.remove();
+    }
   });
 
   $("#browser-network-form").addEventListener("input", () => {
@@ -701,6 +1061,12 @@ async function bootstrap() {
     })
   );
 
+  await loadPriceTables().catch((error) => {
+    const label = $("#tables-state");
+    if (label) {
+      label.textContent = error.message || "价格表加载失败";
+    }
+  });
   await refresh();
   setInterval(() => refresh().catch(() => {}), 5_000);
 }

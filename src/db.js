@@ -1,6 +1,8 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { normalizeScanPacing } from "./scan-pacing.js";
+import { normalizeAppraisal } from "./appraisal.js";
 
 function now() {
   return Date.now();
@@ -33,6 +35,7 @@ function toRule(row) {
     name: row.name,
     category: row.category,
     keyword: row.keyword,
+    kind: row.kind ?? "standard",
     includeTerms: parseJson(row.include_terms),
     excludeTerms: parseJson(row.exclude_terms),
     minPriceCny: row.min_price_cny,
@@ -157,6 +160,9 @@ export class MonitorDatabase {
     if (!columns.some((column) => column.name === "min_price_cny")) {
       this.db.exec("ALTER TABLE rules ADD COLUMN min_price_cny REAL");
     }
+    if (!columns.some((column) => column.name === "kind")) {
+      this.db.exec("ALTER TABLE rules ADD COLUMN kind TEXT NOT NULL DEFAULT 'standard'");
+    }
 
     const blockedColumns = this.db.prepare("PRAGMA table_info(blocked_listings)").all();
     if (!blockedColumns.some((column) => column.name === "block_reason")) {
@@ -233,6 +239,24 @@ export class MonitorDatabase {
       .run(key, String(value), now());
   }
 
+  #scanPacingSetting() {
+    try {
+      const parsed = JSON.parse(this.getSetting("scan_pacing") ?? "null");
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  #appraisalSetting() {
+    try {
+      const parsed = JSON.parse(this.getSetting("appraisal") ?? "null");
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
   getPublicSettings() {
     return {
       astrbotBaseUrl: this.getSetting("astrbot_base_url") ?? "http://127.0.0.1:6185",
@@ -243,7 +267,9 @@ export class MonitorDatabase {
       aiEnabled: this.getSetting("ai_enabled") === "1",
       aiBaseUrl: this.getSetting("ai_base_url") ?? "http://127.0.0.1:11434/v1",
       aiApiKeyConfigured: Boolean(this.getSetting("ai_api_key")),
-      aiModel: this.getSetting("ai_model") ?? "qwen2.5:7b"
+      aiModel: this.getSetting("ai_model") ?? "qwen2.5:7b",
+      scanPacing: normalizeScanPacing(this.#scanPacingSetting()),
+      appraisal: normalizeAppraisal(this.#appraisalSetting())
     };
   }
 
@@ -306,8 +332,8 @@ export class MonitorDatabase {
       .prepare(`
         INSERT INTO rules (
           name, category, keyword, include_terms, exclude_terms, min_price_cny, price_ceiling_cny,
-          personal_only, enabled, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          personal_only, enabled, created_at, updated_at, kind
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         input.name,
@@ -320,7 +346,8 @@ export class MonitorDatabase {
         input.personalOnly ? 1 : 0,
         input.enabled ? 1 : 0,
         timestamp,
-        timestamp
+        timestamp,
+        input.kind === "machine" ? "machine" : "standard"
       );
     return this.getRule(Number(result.lastInsertRowid));
   }

@@ -1,5 +1,6 @@
 node_modules/
-data/
+data/*
+!data/price-tables.json
 .env
 outputs/
 work/
