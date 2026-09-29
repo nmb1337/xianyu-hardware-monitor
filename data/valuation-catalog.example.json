@@ -1,0 +1,15 @@
+{
+  "version": "replace-with-local-price-table",
+  "sourceDate": null,
+  "hostCapCny": 5500,
+  "tolerancePercent": 15,
+  "motherboardDefaultCny": 50,
+  "storagePricesCny": {
+    "256g": 100,
+    "512g": 200,
+    "1tb": 400
+  },
+  "cpu": [],
+  "gpu": [],
+  "memory": []
+}

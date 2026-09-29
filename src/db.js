@@ -3,6 +3,12 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { normalizeScanPacing } from "./scan-pacing.js";
 import { normalizeAppraisal } from "./appraisal.js";
+import {
+  COMPONENT_MIN_SCAN_INTERVAL_SECONDS,
+  DESKTOP_MIN_SCAN_INTERVAL_SECONDS,
+  isDesktopValuationMode,
+  normalizeScanIntervalSeconds
+} from "./scan-policy.js";
 
 function now() {
   return Date.now();
@@ -25,6 +31,19 @@ function serializeTerms(value) {
   return JSON.stringify(Array.isArray(value) ? value : []);
 }
 
+function parseObject(value, fallback = {}) {
+  try {
+    const result = JSON.parse(value ?? "");
+    return result && typeof result === "object" && !Array.isArray(result) ? result : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function serializeObject(value, fallback = {}) {
+  return JSON.stringify(value && typeof value === "object" && !Array.isArray(value) ? value : fallback);
+}
+
 function toRule(row) {
   if (!row) {
     return null;
@@ -36,6 +55,12 @@ function toRule(row) {
     category: row.category,
     keyword: row.keyword,
     kind: row.kind ?? "standard",
+    valuationMode: row.valuation_mode ?? (row.kind === "machine" ? "desktop_host" : "component"),
+    hostValuationCapCny: row.host_valuation_cap_cny ?? 5500,
+    valuationTolerancePercent: row.valuation_tolerance_percent ?? 15,
+    detailScanEnabled: toBoolean(row.detail_scan_enabled ?? (row.kind === "machine" ? 1 : 0)),
+    scanIntervalSeconds: row.scan_interval_seconds,
+    nextScanAt: row.next_scan_at,
     includeTerms: parseJson(row.include_terms),
     excludeTerms: parseJson(row.exclude_terms),
     minPriceCny: row.min_price_cny,
@@ -78,6 +103,10 @@ export class MonitorDatabase {
         personal_only INTEGER NOT NULL DEFAULT 1,
         enabled INTEGER NOT NULL DEFAULT 1,
         scan_interval_seconds INTEGER NOT NULL DEFAULT 300,
+        valuation_mode TEXT NOT NULL DEFAULT 'component',
+        host_valuation_cap_cny REAL NOT NULL DEFAULT 5500,
+        valuation_tolerance_percent REAL NOT NULL DEFAULT 15,
+        detail_scan_enabled INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         last_scanned_at INTEGER,
@@ -97,6 +126,21 @@ export class MonitorDatabase {
         last_seen_at INTEGER NOT NULL,
         below_threshold_alerted INTEGER NOT NULL DEFAULT 0,
         last_alert_price REAL,
+        seller_type TEXT,
+        detail_error TEXT,
+        components_json TEXT NOT NULL DEFAULT '{}',
+        valuation_cny REAL,
+        valuation_status TEXT,
+        valuation_confidence TEXT,
+        missing_parts_json TEXT NOT NULL DEFAULT '[]',
+        valuation_source_version TEXT,
+        valuation_matched INTEGER,
+        valuation_reason TEXT,
+        desktop_eligible INTEGER,
+        eligibility_reasons_json TEXT NOT NULL DEFAULT '[]',
+        seller_risk_level TEXT,
+        seller_risk_reasons_json TEXT NOT NULL DEFAULT '[]',
+        configuration_conflicts_json TEXT NOT NULL DEFAULT '[]',
         PRIMARY KEY (rule_id, item_id)
       );
 
@@ -163,6 +207,61 @@ export class MonitorDatabase {
     if (!columns.some((column) => column.name === "kind")) {
       this.db.exec("ALTER TABLE rules ADD COLUMN kind TEXT NOT NULL DEFAULT 'standard'");
     }
+    for (const [name, definition] of [
+      ["scan_interval_seconds", "INTEGER NOT NULL DEFAULT 300"],
+      ["next_scan_at", "INTEGER"],
+      ["valuation_mode", "TEXT NOT NULL DEFAULT 'component'"],
+      ["host_valuation_cap_cny", "REAL NOT NULL DEFAULT 5500"],
+      ["valuation_tolerance_percent", "REAL NOT NULL DEFAULT 15"],
+      ["detail_scan_enabled", "INTEGER NOT NULL DEFAULT 0"]
+    ]) {
+      if (!columns.some((column) => column.name === name)) {
+        this.db.exec(`ALTER TABLE rules ADD COLUMN ${name} ${definition}`);
+      }
+    }
+    const listingColumns = this.db.prepare("PRAGMA table_info(listings)").all();
+    for (const [name, definition] of [
+      ["seller_type", "TEXT"],
+      ["detail_error", "TEXT"],
+      ["components_json", "TEXT NOT NULL DEFAULT '{}'"],
+      ["valuation_cny", "REAL"],
+      ["valuation_status", "TEXT"],
+      ["valuation_confidence", "TEXT"],
+      ["missing_parts_json", "TEXT NOT NULL DEFAULT '[]'"],
+      ["valuation_source_version", "TEXT"],
+      ["valuation_matched", "INTEGER"],
+      ["valuation_reason", "TEXT"],
+      ["desktop_eligible", "INTEGER"],
+      ["eligibility_reasons_json", "TEXT NOT NULL DEFAULT '[]'"],
+      ["seller_risk_level", "TEXT"],
+      ["seller_risk_reasons_json", "TEXT NOT NULL DEFAULT '[]'"],
+      ["configuration_conflicts_json", "TEXT NOT NULL DEFAULT '[]'"]
+    ]) {
+      if (!listingColumns.some((column) => column.name === name)) {
+        this.db.exec(`ALTER TABLE listings ADD COLUMN ${name} ${definition}`);
+      }
+    }
+    this.db.exec(`
+      UPDATE rules
+      SET valuation_mode = CASE
+        WHEN kind = 'machine' OR category = 'desktop' THEN 'desktop_host'
+        ELSE COALESCE(valuation_mode, 'component')
+      END,
+      kind = CASE
+        WHEN kind = 'machine' OR category = 'desktop' THEN 'machine'
+        ELSE COALESCE(kind, 'standard')
+      END,
+      category = CASE WHEN category = 'desktop' THEN 'custom' ELSE category END,
+      scan_interval_seconds = CASE
+        WHEN kind = 'machine' OR valuation_mode = 'desktop_host'
+          THEN MAX(900, COALESCE(scan_interval_seconds, 900))
+        ELSE MAX(600, COALESCE(scan_interval_seconds, 600))
+      END,
+      detail_scan_enabled = CASE
+        WHEN kind = 'machine' OR valuation_mode = 'desktop_host' THEN 1
+        ELSE COALESCE(detail_scan_enabled, 0)
+      END
+    `);
 
     const blockedColumns = this.db.prepare("PRAGMA table_info(blocked_listings)").all();
     if (!blockedColumns.some((column) => column.name === "block_reason")) {
@@ -269,7 +368,11 @@ export class MonitorDatabase {
       aiApiKeyConfigured: Boolean(this.getSetting("ai_api_key")),
       aiModel: this.getSetting("ai_model") ?? "qwen2.5:7b",
       scanPacing: normalizeScanPacing(this.#scanPacingSetting()),
-      appraisal: normalizeAppraisal(this.#appraisalSetting())
+    appraisal: normalizeAppraisal(this.#appraisalSetting()),
+      valuation: {
+        defaultComponentIntervalSeconds: COMPONENT_MIN_SCAN_INTERVAL_SECONDS,
+        defaultDesktopIntervalSeconds: DESKTOP_MIN_SCAN_INTERVAL_SECONDS
+      }
     };
   }
 
@@ -328,12 +431,17 @@ export class MonitorDatabase {
   createRule(input) {
     const timestamp = now();
     const maximum = input.maxPriceCny ?? input.priceCeilingCny;
+    const valuationMode = input.valuationMode === "desktop_host" || input.kind === "machine"
+      ? "desktop_host"
+      : "component";
+    const kind = valuationMode === "desktop_host" ? "machine" : "standard";
     const result = this.db
       .prepare(`
         INSERT INTO rules (
           name, category, keyword, include_terms, exclude_terms, min_price_cny, price_ceiling_cny,
-          personal_only, enabled, created_at, updated_at, kind
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          personal_only, enabled, scan_interval_seconds, valuation_mode, host_valuation_cap_cny,
+          valuation_tolerance_percent, detail_scan_enabled, created_at, updated_at, kind
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         input.name,
@@ -345,9 +453,14 @@ export class MonitorDatabase {
         maximum,
         input.personalOnly ? 1 : 0,
         input.enabled ? 1 : 0,
+        normalizeScanIntervalSeconds(input.scanIntervalSeconds, valuationMode),
+        valuationMode,
+        Number(input.hostValuationCapCny) || 5500,
+        Number.isFinite(Number(input.valuationTolerancePercent)) ? Number(input.valuationTolerancePercent) : 15,
+        valuationMode === "desktop_host" ? 1 : 0,
         timestamp,
         timestamp,
-        input.kind === "machine" ? "machine" : "standard"
+        kind
       );
     return this.getRule(Number(result.lastInsertRowid));
   }
@@ -361,12 +474,17 @@ export class MonitorDatabase {
     const timestamp = now();
     const next = { ...current, ...input };
     const maximum = next.maxPriceCny ?? next.priceCeilingCny;
+    const valuationMode = next.valuationMode === "desktop_host" || next.kind === "machine"
+      ? "desktop_host"
+      : "component";
     this.db
       .prepare(`
         UPDATE rules SET
           name = ?, category = ?, keyword = ?, include_terms = ?, exclude_terms = ?,
           min_price_cny = ?, price_ceiling_cny = ?, personal_only = ?, enabled = ?,
-          updated_at = ?, last_scanned_at = NULL, last_error = NULL
+          scan_interval_seconds = ?, valuation_mode = ?, kind = ?, host_valuation_cap_cny = ?,
+          valuation_tolerance_percent = ?, detail_scan_enabled = ?, updated_at = ?,
+          last_scanned_at = NULL, next_scan_at = NULL, last_error = NULL
         WHERE id = ?
       `)
       .run(
@@ -379,6 +497,12 @@ export class MonitorDatabase {
         maximum,
         next.personalOnly ? 1 : 0,
         next.enabled ? 1 : 0,
+        normalizeScanIntervalSeconds(next.scanIntervalSeconds, valuationMode),
+        valuationMode,
+        valuationMode === "desktop_host" ? "machine" : "standard",
+        Number(next.hostValuationCapCny) || 5500,
+        Number.isFinite(Number(next.valuationTolerancePercent)) ? Number(next.valuationTolerancePercent) : 15,
+        valuationMode === "desktop_host" ? 1 : 0,
         timestamp,
         id
       );
@@ -402,19 +526,19 @@ export class MonitorDatabase {
       .map(toRule);
   }
 
-  markRuleScanned(id, { error = null } = {}) {
+  markRuleScanned(id, { error = null, nextScanAt = null } = {}) {
     if (error) {
       this.db
-        .prepare("UPDATE rules SET last_error = ?, updated_at = ? WHERE id = ?")
-        .run(error, now(), id);
+        .prepare("UPDATE rules SET last_error = ?, next_scan_at = ?, updated_at = ? WHERE id = ?")
+        .run(error, nextScanAt, now(), id);
       return;
     }
     this.db
-      .prepare("UPDATE rules SET last_scanned_at = ?, last_error = NULL, updated_at = ? WHERE id = ?")
-      .run(now(), now(), id);
+      .prepare("UPDATE rules SET last_scanned_at = ?, next_scan_at = ?, last_error = NULL, updated_at = ? WHERE id = ?")
+      .run(now(), nextScanAt, now(), id);
   }
 
-  recordCandidateListing(rule, listing, price, shouldAlert, message) {
+  recordCandidateListing(rule, listing, price, shouldAlert, message, valuation = null) {
     const existing = this.db
       .prepare("SELECT * FROM listings WHERE rule_id = ? AND item_id = ?")
       .get(rule.id, listing.itemId);
@@ -432,8 +556,12 @@ export class MonitorDatabase {
           .prepare(`
             INSERT INTO listings (
               rule_id, item_id, title, current_price, url, seller_name, is_personal,
-              first_seen_at, last_seen_at, below_threshold_alerted, last_alert_price
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              first_seen_at, last_seen_at, below_threshold_alerted, last_alert_price,
+              seller_type, detail_error, components_json, valuation_cny, valuation_status,
+              valuation_confidence, missing_parts_json, valuation_source_version,
+              valuation_matched, valuation_reason, desktop_eligible, eligibility_reasons_json,
+              seller_risk_level, seller_risk_reasons_json, configuration_conflicts_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `)
           .run(
             rule.id,
@@ -446,7 +574,22 @@ export class MonitorDatabase {
             timestamp,
             timestamp,
             shouldAlert ? 1 : 0,
-            shouldAlert ? price : null
+            shouldAlert ? price : null,
+            listing.sellerType ?? "",
+            listing.detailError ?? "",
+            serializeObject(valuation?.components),
+            valuation?.valuationCny ?? null,
+            valuation?.valuationStatus ?? null,
+            valuation?.valuationConfidence ?? null,
+            JSON.stringify(valuation?.missingParts ?? []),
+            valuation?.priceTableVersion ?? null,
+            valuation?.valuationMatched === true ? 1 : valuation?.valuationMatched === false ? 0 : null,
+            valuation?.valuationReason ?? null,
+            valuation?.desktopEligible === true ? 1 : valuation?.desktopEligible === false ? 0 : null,
+            JSON.stringify(valuation?.eligibilityReasons ?? []),
+            valuation?.sellerRiskLevel ?? null,
+            JSON.stringify(valuation?.sellerRiskReasons ?? []),
+            JSON.stringify(valuation?.configurationConflicts ?? [])
           );
         queued = shouldAlert;
       } else {
@@ -454,7 +597,11 @@ export class MonitorDatabase {
           .prepare(`
             UPDATE listings
             SET title = ?, current_price = ?, url = ?, seller_name = ?, is_personal = ?,
-                last_seen_at = ?
+                last_seen_at = ?, seller_type = ?, detail_error = ?, components_json = ?,
+                valuation_cny = ?, valuation_status = ?, valuation_confidence = ?,
+                missing_parts_json = ?, valuation_source_version = ?, valuation_matched = ?,
+                valuation_reason = ?, desktop_eligible = ?, eligibility_reasons_json = ?,
+                seller_risk_level = ?, seller_risk_reasons_json = ?, configuration_conflicts_json = ?
             WHERE rule_id = ? AND item_id = ?
           `)
           .run(
@@ -464,6 +611,21 @@ export class MonitorDatabase {
             listing.sellerName ?? "",
             listing.isPersonal === false ? 0 : 1,
             timestamp,
+            listing.sellerType ?? "",
+            listing.detailError ?? "",
+            serializeObject(valuation?.components),
+            valuation?.valuationCny ?? null,
+            valuation?.valuationStatus ?? null,
+            valuation?.valuationConfidence ?? null,
+            JSON.stringify(valuation?.missingParts ?? []),
+            valuation?.priceTableVersion ?? null,
+            valuation?.valuationMatched === true ? 1 : valuation?.valuationMatched === false ? 0 : null,
+            valuation?.valuationReason ?? null,
+            valuation?.desktopEligible === true ? 1 : valuation?.desktopEligible === false ? 0 : null,
+            JSON.stringify(valuation?.eligibilityReasons ?? []),
+            valuation?.sellerRiskLevel ?? null,
+            JSON.stringify(valuation?.sellerRiskReasons ?? []),
+            JSON.stringify(valuation?.configurationConflicts ?? []),
             rule.id,
             listing.itemId
           );
@@ -495,11 +657,19 @@ export class MonitorDatabase {
           listings.current_price AS currentPrice, listings.url, listings.seller_name AS sellerName,
           listings.is_personal AS isPersonal, listings.first_seen_at AS firstSeenAt,
           listings.last_seen_at AS lastSeenAt, listings.last_alert_price AS lastAlertPrice,
+          listings.seller_type AS sellerType, listings.detail_error AS detailError,
+          listings.components_json AS componentsJson, listings.valuation_cny AS valuationCny,
+          listings.valuation_status AS valuationStatus, listings.valuation_confidence AS valuationConfidence,
+          listings.missing_parts_json AS missingPartsJson, listings.valuation_source_version AS valuationSourceVersion,
+          listings.valuation_matched AS valuationMatched, listings.valuation_reason AS valuationReason,
+          listings.desktop_eligible AS desktopEligible, listings.eligibility_reasons_json AS eligibilityReasonsJson,
+          listings.seller_risk_level AS sellerRiskLevel, listings.seller_risk_reasons_json AS sellerRiskReasonsJson,
+          listings.configuration_conflicts_json AS configurationConflictsJson,
           rules.name AS ruleName, rules.category AS category,
           rules.min_price_cny AS minPriceCny, rules.price_ceiling_cny AS maxPriceCny
         FROM listings
         JOIN rules ON rules.id = listings.rule_id
-        WHERE listings.below_threshold_alerted = 1
+          WHERE (listings.below_threshold_alerted = 1 OR rules.kind = 'machine')
           AND NOT EXISTS (
             SELECT 1
             FROM blocked_listings
@@ -509,7 +679,17 @@ export class MonitorDatabase {
         LIMIT ?
       `)
       .all(Math.max(1, Math.min(500, Number(limit) || 100)))
-      .map((row) => ({ ...row, isPersonal: Boolean(row.isPersonal) }));
+      .map((row) => ({
+        ...row,
+        isPersonal: Boolean(row.isPersonal),
+        valuationMatched: row.valuationMatched === null ? null : Boolean(row.valuationMatched),
+        desktopEligible: row.desktopEligible === null ? null : Boolean(row.desktopEligible),
+        components: parseObject(row.componentsJson),
+        missingParts: parseJson(row.missingPartsJson),
+        eligibilityReasons: parseJson(row.eligibilityReasonsJson),
+        sellerRiskReasons: parseJson(row.sellerRiskReasonsJson),
+        configurationConflicts: parseJson(row.configurationConflictsJson)
+      }));
   }
 
   listBlockedListings(limit = 100) {

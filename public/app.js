@@ -160,7 +160,7 @@ function renderRules(rules) {
   const enabledCount = enabledRules.length;
   $("#rule-count").textContent = `${rules.length} 条规则，${enabledCount} 条启用`;
   $("#rotation-estimate").textContent = enabledCount
-    ? `将按顺序查询 ${enabledCount} 条启用规则（每条间隔随机 45–75 秒），循环执行`
+    ? `将按顺序查询 ${enabledCount} 条启用规则；普通规则至少 600 秒、整机规则至少 900 秒，规则之间随机冷却 45–90 秒`
     : "暂无已启用规则";
   const body = $("#rules-body");
   if (!rules.length) {
@@ -181,9 +181,11 @@ function renderRules(rules) {
         .join(" | ");
       return `
         <tr>
-          <td><strong>${escapeHtml(rule.name)}</strong><small>${escapeHtml(categoryLabel(rule.category))}</small></td>
+          <td><strong>${escapeHtml(rule.name)}</strong><small>${escapeHtml(categoryLabel(rule.category))} · ${rule.valuationMode === "desktop_host" || rule.kind === "machine" ? "整机估价" : "普通部件"}</small></td>
           <td>${escapeHtml(rule.keyword)}${order >= 0 ? `<small>按顺序第 ${order + 1} 位</small>` : ""}</td>
-          <td>${formatPriceRange(rule.minPriceCny, rule.maxPriceCny)}</td>
+          <td>${rule.valuationMode === "desktop_host" || rule.kind === "machine"
+            ? `估值上限 ${formatCurrency(rule.hostValuationCapCny ?? 5500)}<small>±${rule.valuationTolerancePercent ?? 15}% · ${rule.scanIntervalSeconds ?? 900} 秒</small>`
+            : formatPriceRange(rule.minPriceCny, rule.maxPriceCny) + `<small>${rule.scanIntervalSeconds ?? 600} 秒</small>`}</td>
           <td>${escapeHtml(filters || "-")}</td>
           <td><span class="tag ${rule.enabled ? "on" : "off"}">${rule.enabled ? "已启用" : "已停用"}</span></td>
           <td>${rule.lastError ? `<small class="error-text">${escapeHtml(rule.lastError)}</small>` : `<small>${rule.lastScannedAt ? formatTime(rule.lastScannedAt) : "未扫描"}</small>`}</td>
@@ -215,7 +217,8 @@ function renderListings(listings) {
         <tr>
           <td><strong>${escapeHtml(listing.title)}</strong><small>${escapeHtml(listing.sellerName || "卖家信息未识别")}</small></td>
           <td>${escapeHtml(categoryLabel(listing.category))}<small>${escapeHtml(listing.ruleName)}</small></td>
-          <td>${formatCurrency(listing.currentPrice)}</td>
+          <td>${formatCurrency(listing.currentPrice)}${listing.valuationCny !== null && listing.valuationCny !== undefined
+            ? `<small>回收估值 ${formatCurrency(listing.valuationCny)}</small>` : ""}</td>
           <td>${formatPriceRange(listing.minPriceCny, listing.maxPriceCny)}</td>
           <td>${formatTime(listing.lastSeenAt)}</td>
           <td><a href="${escapeHtml(listing.url)}" target="_blank" rel="noreferrer">打开商品</a></td>
@@ -645,6 +648,30 @@ async function bootstrap() {
     .map((category) => `<option value="${category.value}">${category.label}</option>`)
     .join("");
 
+  const valuationMode = $("#valuation-mode");
+  const desktopHint = $("#desktop-rule-hint");
+  const hostCap = $("#host-valuation-cap");
+  const tolerance = $("#valuation-tolerance-percent");
+  const scanInterval = $("#scan-interval-seconds");
+  const syncRuleMode = () => {
+    const desktop = valuationMode.value === "desktop_host";
+    desktopHint.hidden = !desktop;
+    hostCap.disabled = !desktop;
+    tolerance.disabled = !desktop;
+    scanInterval.min = desktop ? "900" : "600";
+    if (Number(scanInterval.value) < Number(scanInterval.min)) {
+      scanInterval.value = scanInterval.min;
+    }
+    const keyword = $("#rule-form").elements.keyword;
+    if (desktop && !keyword.value.trim()) {
+      keyword.placeholder = "例如：台式主机 / 电脑整机 / 游戏主机";
+    } else {
+      keyword.placeholder = "例如：4070 super 显卡";
+    }
+  };
+  valuationMode.addEventListener("change", syncRuleMode);
+  syncRuleMode();
+
   $("#rule-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const button = event.submitter;
@@ -654,6 +681,10 @@ async function bootstrap() {
       name: form.get("name"),
       category: form.get("category"),
       keyword: form.get("keyword"),
+      valuationMode: form.get("valuationMode"),
+      hostValuationCapCny: form.get("hostValuationCapCny"),
+      valuationTolerancePercent: form.get("valuationTolerancePercent"),
+      scanIntervalSeconds: form.get("scanIntervalSeconds"),
       minPriceCny: form.get("minPriceCny"),
       maxPriceCny: form.get("maxPriceCny"),
       includeTerms: form.get("includeTerms"),
@@ -674,8 +705,13 @@ async function bootstrap() {
       }
       formElement.reset();
       formElement.querySelector('[name="minPriceCny"]').value = "0";
+      formElement.querySelector('[name="valuationMode"]').value = "component";
+      formElement.querySelector('[name="hostValuationCapCny"]').value = "5500";
+      formElement.querySelector('[name="valuationTolerancePercent"]').value = "15";
+      formElement.querySelector('[name="scanIntervalSeconds"]').value = "600";
       formElement.querySelector('[name="personalOnly"]').checked = true;
       formElement.querySelector('[name="enabled"]').checked = true;
+      syncRuleMode();
       state.editingRuleId = null;
       $("#save-rule").textContent = "添加规则";
     });
@@ -710,6 +746,11 @@ async function bootstrap() {
         formElement.elements.name.value = rule.name;
         formElement.elements.category.value = rule.category;
         formElement.elements.keyword.value = rule.keyword;
+        formElement.elements.valuationMode.value = rule.valuationMode || (rule.kind === "machine" ? "desktop_host" : "component");
+        formElement.elements.hostValuationCapCny.value = rule.hostValuationCapCny ?? 5500;
+        formElement.elements.valuationTolerancePercent.value = rule.valuationTolerancePercent ?? 15;
+        formElement.elements.scanIntervalSeconds.value = rule.scanIntervalSeconds ?? (rule.kind === "machine" ? 900 : 600);
+        syncRuleMode();
         formElement.elements.minPriceCny.value = rule.minPriceCny ?? 0;
         formElement.elements.maxPriceCny.value = rule.maxPriceCny;
         formElement.elements.includeTerms.value = rule.includeTerms.join(", ");

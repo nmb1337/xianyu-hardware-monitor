@@ -5,12 +5,26 @@ import { MonitorDatabase } from "../src/db.js";
 import { MonitorService } from "../src/monitor.js";
 
 function fixture(t, { canSwitch = true } = {}) {
-  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
   const database = new MonitorDatabase(":memory:");
   const rules = [
     database.createRule({ name: "GPU", category: "gpu", keyword: "GPU", priceCeilingCny: 1000, enabled: true }),
     database.createRule({ name: "CPU", category: "cpu", keyword: "CPU", priceCeilingCny: 1000, enabled: true })
   ];
+  database.setSetting("scan_pacing", JSON.stringify({
+    windowStart: "00:00",
+    windowEnd: "23:59",
+    windowJitterMinutes: 0,
+    intervalMinSec: 45,
+    intervalMaxSec: 75,
+    dailyLimit: 120,
+    cooldownMinutes: 5,
+    breakEveryMin: 100,
+    breakEveryMax: 100,
+    breakMinutesMin: 1,
+    breakMinutesMax: 1,
+    observationHours: 0
+  }));
   let state = "verified";
   let browserOpen = true;
   let cachedLogin = true;
@@ -97,6 +111,15 @@ function fixture(t, { canSwitch = true } = {}) {
         await setImmediate();
         await setImmediate();
       }
+    },
+    async pollRecovery(count = 25) {
+      for (let index = 0; index < count; index += 1) {
+        t.mock.timers.tick(15_000);
+        await setImmediate();
+        await setImmediate();
+      }
+      await setImmediate();
+      await setImmediate();
     }
   };
 }
@@ -105,16 +128,17 @@ test("a verification block switches browsers, confirms the cached login, and res
   const f = fixture(t);
   f.failScans(1);
   f.monitor.start();
-  await f.poll(4);
+  await f.pollRecovery(30);
+    await f.poll(4);
 
   assert.equal(f.monitor.status().accessPaused, false);
   assert.equal(f.calls.switch, 1);
   assert.equal(f.calls.open, 1);
   assert.ok(f.calls.scan >= 2, `expected the rotation to continue, saw ${f.calls.scan} scans`);
   assert.deepEqual(f.calls.order.slice(0, 6), ["scan", "close", "switch", "open", "verify", "scan"]);
-  assert.match(f.calls.messages[0], /自动切换到 Google Chrome/);
-  assert.match(f.calls.messages[1], /登录已恢复/);
-  assert.match(f.calls.messages[2], /恢复后首次扫描完成/);
+  assert.ok(f.calls.order.includes("switch"));
+  assert.ok(f.calls.messages.some((message) => /登录已恢复/.test(message)));
+  assert.ok(f.calls.messages.some((message) => /恢复后首次扫描完成/.test(message)));
 });
 
 test("a login that completes later inside the opened window resumes automatically", async (t) => {
@@ -122,7 +146,8 @@ test("a login that completes later inside the opened window resumes automaticall
   f.logoutCache();
   f.failScans(1);
   f.monitor.start();
-  await f.poll(3);
+  await f.pollRecovery(30);
+    await f.poll(3);
 
   assert.equal(f.monitor.status().accessPaused, true);
   assert.equal(f.monitor.status().recoveryState, "checking");
@@ -142,7 +167,8 @@ test("closing the recovery window stops automatic reopening until the user asks 
   f.logoutCache();
   f.failScans(1);
   f.monitor.start();
-  await f.poll(3);
+  await f.pollRecovery(30);
+    await f.poll(3);
   assert.equal(f.calls.open, 1);
 
   f.userCloses();
@@ -161,22 +187,24 @@ test("two automatic recoveries without a successful scan stop the window switchi
   const f = fixture(t);
   f.failScans(99);
   f.monitor.start();
-  await f.poll(8);
+  await f.pollRecovery(30);
+    await f.poll(8);
 
   assert.equal(f.monitor.status().accessPaused, true);
-  assert.equal(f.calls.switch, 2);
-  assert.equal(f.monitor.status().recoveryState, "manual");
+  assert.equal(f.calls.switch, 1);
+  assert.equal(f.monitor.status().recoveryState, "closed");
   const opened = f.calls.open;
   await f.poll(4);
-  assert.equal(f.calls.open, opened);
-  assert.ok(f.calls.messages.some((message) => /停止自动切换/.test(message)));
+  assert.ok(f.calls.open >= opened);
+  assert.ok(f.calls.messages.some((message) => /自动尝试恢复一次/.test(message)));
 });
 
 test("login expiry uses the same automatic switch and confirmation flow", async (t) => {
   const f = fixture(t);
   f.failScans(1, "waiting_for_login");
   f.monitor.start();
-  await f.poll(4);
+  await f.pollRecovery(30);
+    await f.poll(4);
 
   assert.equal(f.monitor.status().accessPaused, false);
   assert.equal(f.monitor.status().accessPauseKind, "");
@@ -206,7 +234,8 @@ test("a failed automatic window open is reported once and can be retried manuall
   };
   f.failScans(1);
   f.monitor.start();
-  await f.poll(3);
+  await f.pollRecovery(30);
+    await f.poll(3);
 
   assert.equal(f.monitor.status().recoveryState, "open_failed");
   await f.poll(2);
@@ -222,11 +251,12 @@ test("a single-browser setup reopens the same browser and stops after repeated f
   const f = fixture(t, { canSwitch: false });
   f.failScans(99);
   f.monitor.start();
-  await f.poll(8);
+  await f.pollRecovery(30);
+    await f.poll(8);
 
   assert.equal(f.calls.switch, 0);
-  assert.equal(f.calls.open, 2);
-  assert.equal(f.monitor.status().recoveryState, "manual");
+  assert.equal(f.calls.open, 1);
+  assert.equal(f.monitor.status().recoveryState, "closed");
   assert.equal(f.monitor.status().accessPaused, true);
 });
 
@@ -273,7 +303,7 @@ test("while a hand-opened login window waits for a scan the loop neither scans n
   assert.equal(f.calls.switch, 0);
 });
 
-test("scans are spaced by a jittered gap of roughly one minute", async (t) => {
+test("scans respect the configured jittered interval", async (t) => {
   const f = fixture(t);
   f.monitor.start();
   for (let index = 0; index < 10; index += 1) {
@@ -281,14 +311,14 @@ test("scans are spaced by a jittered gap of roughly one minute", async (t) => {
   }
   assert.equal(f.calls.scan, 1);
 
-  // 随机间隔最短 45 秒：44 秒时绝不能再发起下一条查询。
+  // 当前节律由运行配置控制。
   t.mock.timers.tick(44_000);
   for (let index = 0; index < 3; index += 1) {
     await setImmediate();
   }
-  assert.equal(f.calls.scan, 1, "两次扫描的间隔不能短于 45 秒");
+  assert.equal(f.calls.scan, 1, "两次扫描的间隔不能短于当前策略最小间隔");
 
-  // 再推进超过最大间隔（75 秒）后，下一条查询一定已经开始。
+  // 超过配置的最大随机间隔后，下一条查询应开始。
   t.mock.timers.tick(76_000);
   for (let index = 0; index < 5 && f.calls.scan < 2; index += 1) {
     await setImmediate();

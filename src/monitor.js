@@ -1,11 +1,14 @@
 import { categoryLabel } from "./categories.js";
 import { evaluateListing } from "./filter.js";
-
+import { estimateDesktopListing, valuationBounds } from "./valuation.js";
 import { minutesToTime, normalizeScanPacing, parseTimeToMinutes } from "./scan-pacing.js";
-
-function randomBetween(minimum, maximum) {
-  return minimum + Math.floor(Math.random() * (maximum - minimum + 1));
-}
+import {
+  MANUAL_SCAN_COOLDOWN_SECONDS,
+  RULE_GAP_MAX_MILLISECONDS,
+  RULE_GAP_MIN_MILLISECONDS,
+  isAccessPauseError,
+  randomBetween
+} from "./scan-policy.js";
 
 function roundPrice(price) {
   return Number(price).toLocaleString("zh-CN", {
@@ -49,6 +52,45 @@ function buildMachineMessage(listing, appraisal) {
   }
   lines.push(`商品链接: ${listing.url}`);
   return lines.join("\n");
+}
+
+function componentLine(component, label) {
+  if (!component) return `${label}: 未识别`;
+  if (component.default) return `${label}: ${component.model}（默认 ${component.priceCny} 元）`;
+  if (!Number.isFinite(component.priceCny)) return `${label}: ${component.model}（价格表未覆盖）`;
+  return `${label}: ${component.model} ${component.priceCny} 元`;
+}
+
+function buildStrictValuationMessage(rule, listing, valuation) {
+  const components = valuation.components ?? {};
+  const bounds = valuationBounds(valuation.valuationCny, rule.valuationTolerancePercent);
+  const missing = valuation.missingParts.length ? valuation.missingParts.join("、") : "无";
+  return [
+    "闲鱼整机捡漏提醒",
+    listing.title,
+    `商品价: ${roundPrice(listing.price)} 元`,
+    `回收估值: ${roundPrice(valuation.valuationCny)} 元`,
+    `估值范围: ${roundPrice(bounds.lowerPrice)} - ${roundPrice(bounds.upperPrice)} 元`,
+    `估值完整度: ${valuation.valuationConfidence === "high" ? "完整" : "不完整，需核验"}${valuation.extremelyLow ? "；极低价，重点核验" : ""}`,
+    componentLine(components.cpu, "CPU"),
+    componentLine(components.gpu, "显卡"),
+    componentLine(components.motherboard, "主板"),
+    componentLine(components.memory, "内存"),
+    componentLine(components.storage, "硬盘"),
+    `缺失或未计入: ${missing}`,
+    `商品链接: ${listing.url}`
+  ].join("\n");
+}
+
+function strictValuationReason(valuation, listing) {
+  if (listing.detailError) return `详情页读取失败：${listing.detailError}`;
+  if (valuation.eligibilityReasons?.length) return valuation.eligibilityReasons.join("；");
+  if (valuation.unusable) return `疑似故障或非正常可用：${valuation.conditionIssues.join("、")}`;
+  if (valuation.valuationStatus === "missing_required") return "缺少可定价的 CPU 或显卡、内存或固态";
+  if (valuation.valuationStatus === "over_cap") return "核心部件回收估值超过上限";
+  if (valuation.valuationStatus === "unpriced") return "没有可计价的硬件";
+  if (!valuation.matched) return `商品价高于估值上限 ${roundPrice(valuation.upperPrice)} 元`;
+  return valuation.valuationStatus;
 }
 
 function isAccessBlockState(state) {
@@ -203,8 +245,8 @@ export class MonitorService {
     try {
       const listings = await this.browser.scan(rule);
       this.manualLoginMode = false;
-      if (rule.kind === "machine") {
-        const summary = await this.#evaluateMachineListings(rule, listings, { baseline, generation });
+      if (rule.kind === "machine" || rule.valuationMode === "desktop_host") {
+        const summary = await this.#evaluateStrictDesktopListings(rule, listings, { baseline, generation });
         await this.#reportRecoveryScan(`恢复后首次扫描完成。\n${this.lastActivity}`);
         return summary;
       }
@@ -294,17 +336,74 @@ export class MonitorService {
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : "未知扫描错误";
       const browserState = this.browser.status().state;
-      if (isAccessBlockState(browserState)) {
-        await this.#pauseForAccess(browserState === "waiting_for_login" ? "login" : "verification");
+      if (isAccessBlockState(browserState) || isAccessPauseError(error, browserState)) {
+        const pausedKind = browserState === "waiting_for_login"
+          || /请先登录|扫码登录|登录失效/i.test(errorMessage)
+          ? "login"
+          : "verification";
+        await this.#pauseForAccess(pausedKind);
       } else {
         this.lastActivity = `扫描失败：${rule.name}，${errorMessage}`;
         await this.#reportRecoveryScan(`恢复后首次扫描未完成。\n${this.lastActivity}`);
       }
       throw error;
     } finally {
-      this.database.markRuleScanned(rule.id, { error: errorMessage });
+      this.database.markRuleScanned(rule.id, {
+        error: errorMessage,
+        nextScanAt: Date.now() + randomBetween(RULE_GAP_MIN_MILLISECONDS, RULE_GAP_MAX_MILLISECONDS)
+      });
       this.activeRuleId = null;
     }
+  }
+
+  async #evaluateStrictDesktopListings(rule, listings, { baseline }) {
+    let matched = 0;
+    let queued = 0;
+    let alreadySeen = 0;
+    let blocked = 0;
+    for (const listing of listings) {
+      const valuation = estimateDesktopListing({
+        title: listing.title,
+        description: listing.description,
+        sellerName: listing.sellerName,
+        sellerType: listing.sellerType,
+        price: listing.price,
+        tolerancePercent: rule.valuationTolerancePercent ?? 15,
+        hostCapCny: rule.hostValuationCapCny ?? 5500
+      });
+      const outcome = {
+        eligible: valuation.eligible,
+        matched: valuation.matched,
+        price: listing.price,
+        reason: strictValuationReason(valuation, listing)
+      };
+      const persisted = {
+        ...valuation,
+        valuationMatched: outcome.matched && !listing.detailError,
+        valuationReason: outcome.reason,
+        valuationExtremelyLow: valuation.extremelyLow
+      };
+      const result = this.database.recordCandidateListing(
+        rule,
+        listing,
+        outcome.price,
+        !baseline && outcome.matched && !listing.detailError,
+        buildStrictValuationMessage(rule, listing, valuation),
+        persisted,
+        { baseline, matched: outcome.matched }
+      );
+      if (result.blocked) {
+        blocked += 1;
+        continue;
+      }
+      if (outcome.matched) matched += 1;
+      if (result.queued) queued += 1;
+      if (result.existing && outcome.matched && !result.queued) alreadySeen += 1;
+    }
+    this.lastActivity = baseline
+      ? `已建立整机估价基线：${rule.name}，记录 ${listings.length} 个结果。`
+      : `整机扫描完成：${rule.name}，低价匹配 ${matched} 个，已见未提醒 ${alreadySeen} 个，新增提醒 ${queued} 个${blocked ? `，已屏蔽 ${blocked} 个` : ""}。`;
+    return { scanned: true, baseline, listings: listings.length, matched, alreadySeen, queued, blocked };
   }
 
   async scanNow(ruleId) {
@@ -814,7 +913,7 @@ export class MonitorService {
           await this.#notifyManualRecovery();
           return;
         }
-        await this.#openBrowser({ automatic: true }).catch(() => {});
+        await this.#openBrowser({ automatic: true, switchBrowser: this.browser.status().canSwitch }).catch(() => {});
         return;
       }
       if (this.accessRecoveryState === "checking" || this.accessRecoveryState === "manual_login") {
@@ -831,7 +930,7 @@ export class MonitorService {
     await this.#sendStatusMessage(this.#accessPauseMessage());
   }
 
-  async #openBrowser({ restart = false, automatic = false } = {}) {
+  async #openBrowser({ restart = false, automatic = false, switchBrowser = false } = {}) {
     if (restart) {
       this.accessRecoveryState = "closing";
       try {
@@ -843,6 +942,15 @@ export class MonitorService {
     }
     if (automatic) {
       this.autoRecoveryAttempts += 1;
+    }
+    if (switchBrowser) {
+      try {
+        await this.browser.switchBrowser();
+        await this.#sendStatusMessage(`自动切换到 ${this.browser.status().browserName}，正在确认闲鱼登录。`);
+      } catch {
+        this.accessRecoveryState = "open_failed";
+        throw new Error("备用浏览器切换失败，请点击“重新登录”重试。");
+      }
     }
     this.accessRecoveryState = "opening";
     try {

@@ -11,6 +11,8 @@ import { XianyuBrowser, parseBrowserProxySetting } from "./browser.js";
 import { MonitorService } from "./monitor.js";
 import { normalizeScanPacing } from "./scan-pacing.js";
 import { Appraiser, normalizeAppraisal } from "./appraisal.js";
+import { normalizeScanIntervalSeconds } from "./scan-policy.js";
+import { valuationCatalog, valuationSettings } from "./valuation.js";
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const rootDirectory = resolve(sourceDirectory, "..");
@@ -92,14 +94,29 @@ function cleanRule(input, current = {}) {
   const hasMinimum = source.minPriceCny !== null && source.minPriceCny !== undefined && source.minPriceCny !== "";
   const minimum = hasMinimum ? Number(source.minPriceCny) : null;
   const category = String(source.category ?? "").trim();
+  const valuationMode = source.valuationMode === "desktop_host"
+    || source.kind === "machine"
+    || category === "desktop"
+    ? "desktop_host"
+    : "component";
+  const kind = valuationMode === "desktop_host" ? "machine" : "standard";
+  const hostValuationCapCny = Number(source.hostValuationCapCny ?? 5500);
+  const valuationTolerancePercent = Number(source.valuationTolerancePercent ?? 15);
+  if (!Number.isFinite(hostValuationCapCny) || hostValuationCapCny <= 0 || hostValuationCapCny > 1_000_000) {
+    throw new Error("整机估值上限必须在 0 到 1,000,000 元之间");
+  }
+  if (!Number.isFinite(valuationTolerancePercent) || valuationTolerancePercent < 0 || valuationTolerancePercent > 100) {
+    throw new Error("估值浮动范围必须在 0 到 100% 之间");
+  }
 
   if (!categoryNames.has(category)) {
     throw new Error("请选择有效的硬件品类");
   }
-  if (!Number.isFinite(maximum) || maximum <= 0 || maximum > 1_000_000) {
+  const normalizedMaximum = Number.isFinite(maximum) && maximum > 0 ? maximum : 1_000_000;
+  if (normalizedMaximum > 1_000_000) {
     throw new Error("最高价必须在 0 到 1,000,000 元之间");
   }
-  if (minimum !== null && (!Number.isFinite(minimum) || minimum < 0 || minimum >= maximum)) {
+  if (minimum !== null && (!Number.isFinite(minimum) || minimum < 0 || minimum >= normalizedMaximum)) {
     throw new Error("最低价必须大于等于 0 且小于最高价");
   }
 
@@ -110,9 +127,18 @@ function cleanRule(input, current = {}) {
     includeTerms: splitTerms(source.includeTerms),
     excludeTerms: splitTerms(source.excludeTerms),
     minPriceCny: minimum,
-    maxPriceCny: maximum,
-    personalOnly: Boolean(source.personalOnly),
-    enabled: source.enabled !== false
+    maxPriceCny: normalizedMaximum,
+    personalOnly: valuationMode === "desktop_host" ? false : Boolean(source.personalOnly),
+    enabled: source.enabled !== false,
+    kind,
+    valuationMode,
+    hostValuationCapCny,
+    valuationTolerancePercent,
+    detailScanEnabled: valuationMode === "desktop_host" ? source.detailScanEnabled !== false : false,
+    scanIntervalSeconds: normalizeScanIntervalSeconds(
+      source.scanIntervalSeconds,
+      valuationMode
+    )
   };
 }
 
@@ -191,6 +217,12 @@ async function routeApi(request, response, url, services) {
   }
   if (method === "GET" && path === "/api/listings") {
     return sendJson(response, 200, database.listListings(url.searchParams.get("limit")));
+  }
+  if (method === "GET" && path === "/api/valuation/settings") {
+    return sendJson(response, 200, valuationSettings());
+  }
+  if (method === "GET" && path === "/api/valuation/catalog") {
+    return sendJson(response, 200, valuationCatalog());
   }
   if (method === "GET" && path === "/api/blocked-listings") {
     return sendJson(response, 200, database.listBlockedListings(url.searchParams.get("limit")));

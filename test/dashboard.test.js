@@ -30,7 +30,8 @@ for (const [name, width, running, accessPaused] of [
       enabledRuleCount: 5, nextRuleId: 1, nextRuleName: "GPU 0", lastScannedRuleId: null,
       lastActivity: accessPaused
         ? "旧窗口已关闭，即将自动切换到 Google Chrome 并打开登录窗口；确认登录有效后会自动继续查询。"
-        : "等待搜索",
+      : "等待搜索",
+      observing: false,
       accessPauseKind: accessPaused ? "verification" : "",
       recoveryState: accessPaused ? "checking" : "none",
       browser: {
@@ -53,6 +54,12 @@ for (const [name, width, running, accessPaused] of [
       "/api/blocked-listings": [],
       "/api/notifications": [],
       "/api/settings": { aiEnabled: false },
+      "/api/scan-pacing": {
+        windowStart: "00:00", windowEnd: "23:59", windowJitterMinutes: 0,
+        intervalMinSec: 600, intervalMaxSec: 600, dailyLimit: 120,
+        cooldownMinutes: 1, breakEveryMin: 100, breakEveryMax: 100,
+        breakMinutesMin: 1, breakMinutesMax: 1, observationHours: 0
+      },
       "/api/ai-rejections": [
         {
           itemId: "fixture", title: "RTX 3070 故障卡", price: 600,
@@ -128,7 +135,7 @@ for (const [name, width, running, accessPaused] of [
     assert.equal(await page.locator("#ai-rejections-body img, #ai-rejections-body script").count(), 0);
     assert.match(
       await page.locator("#search-schedule").innerText(),
-      accessPaused ? /已暂停/ : running ? /随机 45–75 秒/ : /未启动/
+      accessPaused ? /已暂停/ : running ? /按节律查询/ : /未启动/
     );
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
     assert.equal(overflow, false);
@@ -143,7 +150,7 @@ for (const [name, width, running, accessPaused] of [
       assert.equal(await page.locator("#ai-rejections .table-wrap").evaluate((element) =>
         element.scrollWidth > element.clientWidth), false);
     }
-    assert.match(await page.locator("#search-frequency").innerText(), /随机等待 45–75 秒/);
+    assert.match(await page.locator("#search-frequency").innerText(), /间隔随机/);
     await page.locator("#restart-login").click();
     await page.waitForFunction(() => document.querySelector("#access-recovery").textContent.includes("完成登录"));
     assert.equal(restarts, 1);

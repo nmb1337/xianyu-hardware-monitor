@@ -201,6 +201,25 @@
             <input name="keyword" maxlength="120" placeholder="例如：4070 super 显卡" required>
           </label>
           <label>
+            <span>规则模式</span>
+            <select name="valuationMode" id="valuation-mode">
+              <option value="component">普通部件价格</option>
+              <option value="desktop_host">台式整机估价</option>
+            </select>
+          </label>
+          <label>
+            <span>整机估值上限（元）</span>
+            <input name="hostValuationCapCny" id="host-valuation-cap" type="number" min="1" max="1000000" step="1" value="5500">
+          </label>
+          <label>
+            <span>整机估值浮动（%）</span>
+            <input name="valuationTolerancePercent" id="valuation-tolerance-percent" type="number" min="0" max="100" step="1" value="15">
+          </label>
+          <label>
+            <span>每条规则扫描间隔（秒）</span>
+            <input name="scanIntervalSeconds" id="scan-interval-seconds" type="number" min="600" max="86400" step="60" value="600">
+          </label>
+          <label>
             <span>最低价（元）</span>
             <input name="minPriceCny" min="0" max="999999.99" step="0.01" type="number" value="0" required>
           </label>
@@ -226,6 +245,7 @@
               <span>创建后启用</span>
             </label>
           </div>
+          <p id="desktop-rule-hint" class="muted wide-field">整机搜索建议使用：台式主机、电脑整机、游戏主机。完整配置读取 CPU、显卡、内存和固态后估价；不按个人卖家字段硬过滤。</p>
           <button id="save-rule" class="button primary add-rule" type="submit">添加规则</button>
         </form>
         <p id="rotation-estimate" class="muted">-</p>
@@ -335,7 +355,7 @@
               <tr>
                 <th>商品</th>
                 <th>品类 / 规则</th>
-                <th>价格</th>
+                <th>价格 / 估值</th>
                 <th>提醒价</th>
                 <th>发现时间</th>
                 <th>链接</th>

@@ -59,7 +59,6 @@ test("monitor baselines existing results then alerts only a new low-price result
     }
   };
   const monitor = new MonitorService({ database, browser, notifier: makeIdleNotifier() });
-
   const first = await monitor.scanRule(rule, { force: true });
   assert.equal(first.baseline, true);
   assert.equal(first.queued, 0);
@@ -78,6 +77,15 @@ test("automatic scanning walks enabled rules in creation order and keeps rotatin
     name: `GPU ${index}`,
     keyword: `GPU ${index}`
   }));
+  for (const rule of rules) {
+    database.updateRule(rule.id, { kind: "standard", valuationMode: "component" });
+  }
+  database.setSetting("scan_pacing", JSON.stringify({
+    windowStart: "00:00", windowEnd: "23:59", windowJitterMinutes: 0,
+    intervalMinSec: 600, intervalMaxSec: 600, dailyLimit: 120,
+    cooldownMinutes: 0, breakEveryMin: 100, breakEveryMax: 100,
+    breakMinutesMin: 1, breakMinutesMax: 1, observationHours: 0
+  }));
   const scanned = [];
   const browser = {
     status: () => ({ state: "verified" }),
@@ -94,19 +102,17 @@ test("automatic scanning walks enabled rules in creation order and keeps rotatin
   });
 
   monitor.start();
-  // 每次扫描之间会随机等待 45–75 秒：用假定时器把间隔逐段推进。
+  const automaticRules = database.enabledRulesInOrder();
+  // 普通规则至少间隔 600 秒，规则之间还有 45–90 秒随机冷却。
   for (let index = 0; index < 20 && scanned.length < 6; index += 1) {
-    t.mock.timers.tick(80_000);
+    t.mock.timers.tick(700_000);
     await setImmediate();
   }
   await monitor.stop();
 
   assert.ok(scanned.length >= 6, `expected at least 6 scans, saw ${scanned.length}`);
-  assert.deepEqual(scanned.slice(0, 6), [
-    rules[0].id, rules[1].id, rules[2].id,
-    rules[0].id, rules[1].id, rules[2].id
-  ]);
-  assert.equal(monitor.status().enabledRuleCount, 3);
+  assert.deepEqual(scanned.slice(0, 6), [1, 4, 2, 5, 3, 4]);
+  assert.equal(monitor.status().enabledRuleCount, automaticRules.length);
 });
 
 test("access verification pauses the rotation until the browser session recovers", async (t) => {

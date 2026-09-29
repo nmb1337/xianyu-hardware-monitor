@@ -2,15 +2,19 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { URL } from "node:url";
 import { resolve, win32 } from "node:path";
 import { parsePrice } from "./filter.js";
+import {
+  DESKTOP_DETAIL_LIMIT,
+  DESKTOP_DETAIL_WAIT_MAX_MILLISECONDS,
+  DESKTOP_DETAIL_WAIT_MIN_MILLISECONDS,
+  isDesktopValuationMode,
+  randomBetween
+} from "./scan-policy.js";
 
 const SEARCH_URL = "https://www.goofish.com/search?q=";
 const LOGIN_COOKIE_NAMES = new Set(["tracknick", "unb", "lgc"]);
 const SEARCH_RESPONSE_MARKER = "mtop.taobao.idlemtopsearch.pc.search";
 const VERIFICATION_MASK_SELECTOR = ".baxia-dialog-mask";
 
-function randomBetween(minimum, maximum) {
-  return minimum + Math.floor(Math.random() * (maximum - minimum + 1));
-}
 const DEFAULT_BROWSER_PATHS = [
   "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
   "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
@@ -538,6 +542,46 @@ export class XianyuBrowser {
     }
   }
 
+  async #readDesktopDetails(rule, listings) {
+    if (!isDesktopValuationMode(rule.valuationMode) && rule.kind !== "machine") {
+      return listings;
+    }
+    const selected = listings.slice(0, DESKTOP_DETAIL_LIMIT);
+    for (const listing of selected) {
+      try {
+        await this.#checkForManualVerification();
+        const detailPage = await this.context.newPage();
+        try {
+          await detailPage.goto(listing.url, {
+            waitUntil: "domcontentloaded",
+            timeout: 30_000
+          });
+          await detailPage.waitForTimeout(randomBetween(
+            DESKTOP_DETAIL_WAIT_MIN_MILLISECONDS,
+            DESKTOP_DETAIL_WAIT_MAX_MILLISECONDS
+          ));
+          const access = await this.#inspectPageAccess(detailPage);
+          if (access.kind) {
+            await this.#requireAccessCheck(access);
+          }
+          const text = await detailPage.locator("body").innerText({ timeout: 10_000 });
+          listing.description = text.slice(0, 20_000);
+          if (!listing.description.trim()) {
+            listing.detailError = "详情页没有可读取文字";
+          }
+        } finally {
+          await detailPage.close().catch(() => {});
+        }
+      } catch (error) {
+        if (isClosedTargetError(error)) {
+          throw error;
+        }
+        listing.detailError = error instanceof Error ? error.message : "详情页读取失败";
+      }
+    }
+    return listings;
+  }
+
   async #readLatestResponse() {
     const page = this.page;
     let onResponse;
@@ -755,10 +799,11 @@ export class XianyuBrowser {
       }
 
       this.loginState = "verified";
+      const enriched = await this.#readDesktopDetails(rule, listings);
       this.message = listings.length
         ? `已读取 ${listings.length} 个搜索结果。`
         : "未读取到商品卡片，可能需要刷新页面或人工完成验证。";
-      return listings.slice(0, 30);
+      return enriched.slice(0, 30);
     }, { retryClosed: false });
   }
 
