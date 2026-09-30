@@ -87,8 +87,39 @@ test("manual scans respect the persisted per-rule cooldown", async (t) => {
   assert.match(blocked.reason, /冷却/);
 });
 
+test("automatic scans skip a rule until its persisted cooldown expires", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const database = new MonitorDatabase(":memory:");
+  t.after(() => database.close());
+  const rule = makeRule(database, { scanIntervalSeconds: 600 });
+  const calls = [];
+  const browser = {
+    status: () => ({ state: "verified" }),
+    scan: async () => {
+      calls.push(Date.now());
+      return [];
+    }
+  };
+  const monitor = new MonitorService({
+    database,
+    browser,
+    notifier: makeIdleNotifier()
+  });
+
+  await monitor.scanRule(database.getRule(rule.id), { force: true });
+  const skipped = await monitor.scanRule(database.getRule(rule.id));
+  assert.equal(skipped.scanned, false);
+  assert.match(skipped.reason, /冷却/);
+  assert.equal(calls.length, 1);
+
+  t.mock.timers.tick(601_000);
+  const resumed = await monitor.scanRule(database.getRule(rule.id));
+  assert.equal(resumed.scanned, true);
+  assert.equal(calls.length, 2);
+});
+
 test("automatic scanning walks enabled rules in creation order and keeps rotating", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
   const database = new MonitorDatabase(":memory:");
   const rules = Array.from({ length: 3 }, (_, index) => makeRule(database, {
     name: `GPU ${index}`,
@@ -122,7 +153,7 @@ test("automatic scanning walks enabled rules in creation order and keeps rotatin
   const automaticRules = database.enabledRulesInOrder();
   // 普通规则至少间隔 600 秒，规则之间还有 45–90 秒随机冷却。
   for (let index = 0; index < 20 && scanned.length < 6; index += 1) {
-    t.mock.timers.tick(700_000);
+    t.mock.timers.tick(1_000_000);
     await setImmediate();
   }
   await monitor.stop();

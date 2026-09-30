@@ -174,6 +174,26 @@ browserTest("sort click failure removes pending response listeners", async (t) =
   await page.close();
 });
 
+browserTest("continues with the current search response if the latest sort control is unavailable", async (t) => {
+  const { browser, page } = await scanFixture(t);
+  const getByText = page.getByText.bind(page);
+  page.getByText = (text, options) => text === "\u6700\u65b0"
+    ? {
+      filter() { return this; },
+      first() { return this; },
+      click: async () => {
+        await page.evaluate(() => fetch("/h5/mtop.taobao.idlemtopsearch.pc.search/1.0/"));
+        throw new Error("sort menu changed");
+      }
+    }
+    : getByText(text, options);
+  const listings = await browser.scan({ keyword: "gpu" });
+  assert.equal(listings.length, 1);
+  assert.equal(listings[0].itemId, "fixture-gpu");
+  assert.match(browser.status().message, /排序控件不可用，已读取 1 个搜索结果/);
+  await page.close();
+});
+
 browserTest("search API verification responses are not treated as missing prices", async (t) => {
   const { browser } = await scanFixture(t, {
     payload: { ret: ["FAIL_SYS_USER_VALIDATE::verification required"], data: {} }

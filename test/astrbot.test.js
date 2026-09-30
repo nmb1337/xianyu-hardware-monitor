@@ -176,7 +176,7 @@ test("a partially failed alert only retries the receivers that failed", async (t
   assert.deepEqual(JSON.parse(afterFailure.delivered_to), ["111111"]);
 
   failSecond = false;
-  t.mock.timers.tick(21_000);
+  t.mock.timers.tick(61_000);
   const second = notifier.processOne();
   for (let index = 0; index < 10 && umos.length < 3; index += 1) {
     t.mock.timers.tick(5_000);
@@ -193,5 +193,64 @@ test("a partially failed alert only retries the receivers that failed", async (t
     .get();
   assert.equal(afterRetry.status, "sent");
   assert.deepEqual(JSON.parse(afterRetry.delivered_to).sort(), ["111111", "222222"]);
+  database.close();
+});
+
+test("permanent AstrBot authorization failures move directly to failed instead of retrying", async (t) => {
+  const database = new MonitorDatabase(":memory:");
+  database.updateSettings({
+    astrbotBaseUrl: "http://127.0.0.1:6185",
+    astrbotApiKey: "abk_test",
+    astrbotBotId: "napcat-qq",
+    astrbotReceiverQq: "123456"
+  });
+  const rule = database.createRule({ name: "GPU", category: "gpu", keyword: "GPU", priceCeilingCny: 1000, enabled: true });
+  database.recordCandidateListing(
+    rule,
+    { itemId: "auth-error", title: "GPU", url: "https://www.goofish.com/item?id=auth-error", sellerName: "seller" },
+    500, true, "alert"
+  );
+  const notifier = new AstrBotNotifier(database, {
+    fetchImpl: async () => ({
+      ok: false,
+      status: 401,
+      async json() { return { status: "error", message: "invalid API key" }; }
+    })
+  });
+
+  assert.equal(await notifier.processOne(), false);
+  const [row] = database.listNotifications();
+  assert.equal(row.status, "failed");
+  assert.equal(row.attempts, 1);
+  assert.match(row.lastError, /invalid API key/);
+  database.close();
+});
+
+test("AstrBot request timeout does not leave a notification stuck in sending", async () => {
+  const database = new MonitorDatabase(":memory:");
+  database.updateSettings({
+    astrbotBaseUrl: "http://127.0.0.1:6185",
+    astrbotApiKey: "abk_test",
+    astrbotBotId: "napcat-qq",
+    astrbotReceiverQq: "123456"
+  });
+  const rule = database.createRule({ name: "GPU", category: "gpu", keyword: "GPU", priceCeilingCny: 1000, enabled: true });
+  database.recordCandidateListing(
+    rule,
+    { itemId: "timeout", title: "GPU", url: "https://www.goofish.com/item?id=timeout", sellerName: "seller" },
+    500, true, "alert"
+  );
+  const notifier = new AstrBotNotifier(database, {
+    timeoutMs: 20,
+    fetchImpl: async (_url, { signal }) => new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+    })
+  });
+
+  await notifier.processOne();
+  const [row] = database.listNotifications();
+  assert.equal(row.status, "pending");
+  assert.equal(row.attempts, 1);
+  assert.match(row.lastError, /请求超时/);
   database.close();
 });

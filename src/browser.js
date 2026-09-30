@@ -599,8 +599,22 @@ export class XianyuBrowser {
       timer = setTimeout(() => reject(new Error("等待闲鱼搜索结果超时。")), 30_000);
     });
     try {
-      const [result] = await Promise.all([response, this.#clickSortOption("最新")]);
-      return result;
+      try {
+        await this.#clickSortOption("最新");
+      } catch (error) {
+        await this.#checkForManualVerification();
+        try {
+          const result = await Promise.race([
+            response,
+            new Promise((_, reject) => setTimeout(() => reject(error), 1_000))
+          ]);
+          this.message = `未能切换到最新排序，继续读取当前搜索结果：${error instanceof Error ? error.message : "排序控件不可用"}`;
+          return result;
+        } catch {
+          throw error;
+        }
+      }
+      return await response;
     } finally {
       clearTimeout(timer);
       page.removeListener("response", onResponse);
@@ -800,8 +814,9 @@ export class XianyuBrowser {
 
       this.loginState = "verified";
       const enriched = await this.#readDesktopDetails(rule, listings);
+      const sortFallback = this.message.startsWith("未能切换到最新排序");
       this.message = listings.length
-        ? `已读取 ${listings.length} 个搜索结果。`
+        ? `${sortFallback ? "排序控件不可用，" : ""}已读取 ${listings.length} 个搜索结果。`
         : "未读取到商品卡片，可能需要刷新页面或人工完成验证。";
       return enriched.slice(0, 30);
     }, { retryClosed: false });

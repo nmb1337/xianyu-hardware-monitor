@@ -102,21 +102,21 @@ http://127.0.0.1:8788
 1. 在监控控制台点击“打开登录”。
 2. 在弹出的浏览器窗口人工完成闲鱼登录和任何安全验证。需要扫码登录时，窗口会保持打开，等待期间程序不会关闭、切换或刷新它；扫码成功后状态会自动变为“已登录”。建议另一种浏览器也点“切换浏览器”后各登录一次；Chrome 与 Edge 的登录资料分别保存在 `data/chrome-profile` 和 `data/edge-profile`。遇到访问验证或登录失效时，程序会自动改用已登录的另一种浏览器，确认登录后自动继续查询。
 3. 回到控制台点击“验证登录”，状态显示“已登录”后再启动监控。
-4. 第一轮扫描只建立基线，不对开始监控前已存在的商品提醒；之后程序按规则顺序查询（每条之间随机 45–75 秒，平均约 1 分钟一条），新发布且价格位于规则区间内的商品才会提醒。
+4. 第一轮扫描只建立基线，不对开始监控前已存在的商品提醒；之后程序按规则顺序查询。普通规则每条至少间隔 600 秒，整机估价规则每条至少间隔 900 秒，轮询间隔默认随机 120–300 秒并叠加 45–90 秒冷却；新发布且价格位于规则区间内的商品才会提醒。
 5. 如果频繁出现“访问验证/登录失效”，且换浏览器、换账号都无效，通常是网络出口 IP 被风控：在“闲鱼浏览器”中把“网络出口”切换为“直连（不使用代理）”（国内宽带/移动 IP 通常更安全），或填写另一条代理线路；保存后点“关闭浏览器”再点“打开登录”。仍不行时可点“重置资料”清空浏览器环境（等于换新设备，需重新扫码）再试。
 
 不要尝试绕过闲鱼验证码、登录验证或访问限制。电脑需保持开机、联网，且不要进入休眠。
 
 ## 6. 配置登录后自动启动
 
-先确认手动运行 `.\start.ps1` 正常后，在项目根目录以当前 Windows 用户打开 PowerShell，执行：
+先确认手动运行 `.\run-monitor.ps1` 正常后，在项目根目录以当前 Windows 用户打开 PowerShell，执行：
 
 ```powershell
 $project = (Get-Location).Path
 $taskName = "XianyuHardwareMonitor"
 $action = New-ScheduledTaskAction `
   -Execute "powershell.exe" `
-  -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$project\start.ps1`""
+  -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$project\run-monitor.ps1`""
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Description "Launch Xianyu Hardware Monitor after Windows sign-in" -Force
 ```
@@ -134,3 +134,13 @@ Unregister-ScheduledTask -TaskName XianyuHardwareMonitor -Confirm:$false
 ```
 
 Windows 登录后，AstrBot、NapCat 与本监控程序都必须处于运行状态。闲鱼登录状态失效、QQ 账号掉线、AstrBot 或 NapCat 断开时，需要在对应软件中人工恢复。
+
+## 7. 设置桌面图标
+
+项目提供了图标更新脚本。把 PNG 图片路径替换为你自己的图片后，在项目根目录运行：
+
+```powershell
+.\scripts\set-desktop-icon.ps1 -ImagePath "C:\path\to\your\icon.png"
+```
+
+脚本会生成 `assets\xianyu-hardware-monitor.ico`，并更新桌面的 `闲鱼硬件监控.lnk`；快捷方式会后台启动当前项目的 `run-monitor.ps1`，等待 8788 端口就绪后打开控制台。图片会被缩放为 Windows 图标使用的 256×256 尺寸。

@@ -1,8 +1,16 @@
 const MINIMUM_SEND_INTERVAL_MS = 4_000;
 const MAXIMUM_RECEIVERS = 10;
+const REQUEST_TIMEOUT_MS = 20_000;
 
 function wait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function requestError(status, message) {
+  const error = new Error(message || `AstrBot 请求失败 (${status})`);
+  error.status = Number(status) || 0;
+  error.permanent = [400, 401, 403, 404, 422].includes(error.status);
+  return error;
 }
 
 function parseDeliveredReceivers(value) {
@@ -59,9 +67,10 @@ export function normalizeAstrBotBaseUrl(value) {
 }
 
 export class AstrBotNotifier {
-  constructor(database, { fetchImpl = globalThis.fetch } = {}) {
+  constructor(database, { fetchImpl = globalThis.fetch, timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
     this.database = database;
     this.fetch = fetchImpl;
+    this.timeoutMs = Math.max(1, Number(timeoutMs) || REQUEST_TIMEOUT_MS);
     this.processing = false;
     this.lastSentAt = 0;
   }
@@ -116,28 +125,41 @@ export class AstrBotNotifier {
       await wait(waitTime);
     }
 
-    const response = await this.fetch(`${normalizeAstrBotBaseUrl(baseUrl)}/api/v1/im/messages`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({
-        umo: `${botId}:FriendMessage:${qq}`,
-        message: String(message).slice(0, 1_500)
-      })
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    let response;
+    try {
+      response = await this.fetch(`${normalizeAstrBotBaseUrl(baseUrl)}/api/v1/im/messages`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          umo: `${botId}:FriendMessage:${qq}`,
+          message: String(message).slice(0, 1_500)
+        }),
+        signal: controller.signal
+      });
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        throw new Error(`AstrBot 请求超时（${this.timeoutMs / 1000} 秒）`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
     this.lastSentAt = Date.now();
 
     let payload;
     try {
       payload = await response.json();
     } catch {
-      throw new Error(`AstrBot 返回了无法识别的响应 (${response.status})`);
+      throw requestError(response.status, `AstrBot 返回了无法识别的响应 (${response.status})`);
     }
 
     if (!response.ok || payload?.status !== "ok") {
-      throw new Error(payload?.message || `AstrBot 请求失败 (${response.status})`);
+      throw requestError(response.status, payload?.message);
     }
 
     return payload;
@@ -174,7 +196,8 @@ export class AstrBotNotifier {
       this.database.markNotificationFailed(
         notification.id,
         notification.attempts + 1,
-        error instanceof Error ? error.message : "未知 AstrBot 错误"
+        error instanceof Error ? error.message : "未知 AstrBot 错误",
+        error?.permanent === true
       );
       return false;
     } finally {

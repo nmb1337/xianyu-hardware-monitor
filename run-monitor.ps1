@@ -1,3 +1,7 @@
+param(
+  [switch]$OpenBrowser
+)
+
 # Xianyu Hardware Monitor launcher (does not require pnpm)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -31,5 +35,23 @@ else {
   Note ("starting server: {0}" -f $nodeExe)
   Start-Process -FilePath $nodeExe -ArgumentList 'src\server.js' -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $work 'server-out.log') -RedirectStandardError (Join-Path $work 'server-err.log')
   Note 'server process spawned'
+}
+
+if ($OpenBrowser) {
+  $ready = $false
+  for ($index = 0; $index -lt 30; $index += 1) {
+    try {
+      Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8788/api/status' -TimeoutSec 1 | Out-Null
+      $ready = $true
+      break
+    } catch {
+      Start-Sleep -Milliseconds 500
+    }
+  }
+  if ($ready) {
+    Start-Process 'http://127.0.0.1:8788'
+  } else {
+    Note 'server did not become ready before browser launch'
+  }
 }
 

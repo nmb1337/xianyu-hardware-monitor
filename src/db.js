@@ -938,9 +938,9 @@ export class MonitorDatabase {
       .run(JSON.stringify(list), id);
   }
 
-  markNotificationFailed(id, attempts, errorMessage) {
-    const terminal = attempts >= 6;
-    const delayMilliseconds = Math.min(20 * 60_000, 20_000 * 2 ** Math.max(0, attempts - 1));
+  markNotificationFailed(id, attempts, errorMessage, permanent = false) {
+    const terminal = permanent || attempts >= 6;
+    const delayMilliseconds = Math.min(60 * 60_000, 60_000 * 2 ** Math.max(0, attempts - 1));
     this.db
       .prepare(`
         UPDATE notifications

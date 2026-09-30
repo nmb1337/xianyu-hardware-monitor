@@ -28,33 +28,6 @@ function buildMessage(rule, listing, price) {
   ].join("\n");
 }
 
-function buildMachineMessage(listing, appraisal) {
-  const lines = [];
-  if (appraisal) {
-    const priced = appraisal.parts.filter((part) => part.price > 0);
-    const unpriced = appraisal.parts.filter((part) => part.status === "unpriced");
-    const diffText = appraisal.diff === null
-      ? "—"
-      : `${appraisal.diff > 0 ? "+" : ""}${roundPrice(appraisal.diff)}`;
-    lines.push(`【整机疑似低价】${listing.title}`);
-    lines.push(`卖家价 ¥${roundPrice(listing.price)}｜表价合计 ¥${roundPrice(appraisal.sum)}｜净差 ${diffText}（±${appraisal.tolerance} 内推送）`);
-    if (priced.length) {
-      lines.push(`清单：${priced.map((part) => `${part.label}=${roundPrice(part.price)}`).join(" / ")}`);
-    }
-    if (unpriced.length) {
-      lines.push(`未计价：${unpriced.map((part) => part.label).join("、")}`);
-    }
-    if (appraisal.flags.length) {
-      lines.push(`提示：${appraisal.flags.slice(0, 5).join("；")}`);
-    }
-  } else {
-    lines.push(`【整机扫描】${listing.title}`);
-    lines.push(`卖家价 ¥${roundPrice(listing.price)}（估价引擎未启用）`);
-  }
-  lines.push(`商品链接: ${listing.url}`);
-  return lines.join("\n");
-}
-
 function componentLine(component, label) {
   if (!component) return `${label}: 未识别`;
   if (component.default) return `${label}: ${component.model}（默认 ${component.priceCny} 元）`;
@@ -99,12 +72,11 @@ function isAccessBlockState(state) {
 }
 
 export class MonitorService {
-  constructor({ database, browser, notifier, ai = null, appraiser = null }) {
+  constructor({ database, browser, notifier, ai = null }) {
     this.database = database;
     this.browser = browser;
     this.notifier = notifier;
     this.ai = ai;
-    this.appraiser = appraiser;
     this.running = false;
     this.startedAt = null;
     this.lastActivity = "监控尚未启动";
@@ -234,10 +206,16 @@ export class MonitorService {
       this.lastActivity = reason;
       return { scanned: false, reason, matched: 0, queued: 0 };
     }
+    if (!force) {
+      const remainingSeconds = scanCooldownRemainingSeconds(rule.nextScanAt);
+      if (remainingSeconds > 0) {
+        const reason = `该规则仍在冷却中，约 ${Math.ceil(remainingSeconds / 60)} 分钟后再查询。`;
+        this.lastActivity = reason;
+        return { scanned: false, reason, matched: 0, queued: 0, remainingSeconds };
+      }
+    }
     if (force && manual) {
-      const remainingSeconds = rule.lastScannedAt
-        ? scanCooldownRemainingSeconds(rule.nextScanAt)
-        : 0;
+      const remainingSeconds = scanCooldownRemainingSeconds(rule.nextScanAt);
       if (remainingSeconds > 0) {
         const reason = `该规则仍在冷却中，请约 ${Math.ceil(remainingSeconds / 60)} 分钟后再扫描。`;
         this.lastActivity = reason;
@@ -605,10 +583,19 @@ export class MonitorService {
         await this.#waitForLoop(Math.min(this.#msUntilMidnight(), 10 * 60_000));
         continue;
       }
+      const readyRules = scannable.filter((rule) => scanCooldownRemainingSeconds(rule.nextScanAt) === 0);
+      if (!readyRules.length) {
+        const nextCooldownSeconds = Math.min(
+          ...scannable.map((rule) => scanCooldownRemainingSeconds(rule.nextScanAt))
+        );
+        this.lastActivity = `启用规则都在冷却中，约 ${Math.ceil(nextCooldownSeconds / 60)} 分钟后继续查询。`;
+        await this.#waitForLoop(Math.min(Math.max(1_000, nextCooldownSeconds * 1_000), 10 * 60_000));
+        continue;
+      }
 
       // 交替轮换：一个用户规则（显卡等）→ 一个整机自动扫描 → 循环。
-      const standards = scannable.filter((item) => item.kind !== "machine");
-      const machines = scannable.filter((item) => item.kind === "machine");
+      const standards = readyRules.filter((item) => item.kind !== "machine");
+      const machines = readyRules.filter((item) => item.kind === "machine");
       let rule;
       if (this.nextScanKind === "machine" && machines.length) {
         rule = this.#nextRule(machines, this.lastMachineRuleId);
@@ -714,51 +701,6 @@ export class MonitorService {
         kind: "machine"
       });
     }
-  }
-
-  async #evaluateMachineListings(rule, listings, { baseline, generation }) {
-    let hits = 0;
-    let queued = 0;
-    let alreadySeen = 0;
-    let blocked = 0;
-    let appraised = 0;
-    for (const listing of listings) {
-      if (generation !== this.scanGeneration) {
-        break;
-      }
-      if (this.database.isListingBlocked(listing.itemId)) {
-        blocked += 1;
-        continue;
-      }
-      if (this.database.hasListing(rule.id, listing.itemId)) {
-        alreadySeen += 1;
-        continue;
-      }
-      const appraisal = typeof this.appraiser?.appraise === "function"
-        ? this.appraiser.appraise(listing.title, listing.price)
-        : null;
-      appraised += 1;
-      const hit = Boolean(appraisal && appraisal.inWindow === true && appraisal.kind === "machine");
-      if (hit) {
-        hits += 1;
-      }
-      const result = this.database.recordCandidateListing(
-        rule,
-        listing,
-        listing.price,
-        !baseline && hit,
-        buildMachineMessage(listing, appraisal)
-      );
-      if (result.queued) {
-        queued += 1;
-      }
-    }
-    this.lastActivity = baseline
-      ? `已建立基线：${rule.name}，记录 ${listings.length} 个结果。`
-      : appraised
-        ? `扫描完成：${rule.name}，估价 ${appraised} 个，窗口命中 ${hits} 个，新增提醒 ${queued} 个${alreadySeen ? `，已见 ${alreadySeen} 个` : ""}${blocked ? `，已屏蔽 ${blocked} 个` : ""}。`
-        : `扫描完成：${rule.name}，没有新商品。`;
-    return { scanned: true, baseline, listings: listings.length, matched: hits, alreadySeen, queued, blocked };
   }
 
   #pacing() {
