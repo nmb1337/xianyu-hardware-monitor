@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
@@ -15,10 +15,10 @@ if (-not $pnpm -and $corepack) {
   $useCorepack = $true
 }
 if (-not $pnpm) {
-  throw "未找到 pnpm 或 corepack。请先安装 Node.js 22.13 或更高版本。"
+  throw "pnpm or corepack is required. Install Node.js 22.13 or newer."
 }
 
-if (-not (Test-Path "node_modules/playwright-core")) {
+if (-not (Test-Path 'node_modules/playwright-core')) {
   if ($useCorepack) {
     & $pnpm.Source pnpm install
   } else {
