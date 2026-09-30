@@ -649,7 +649,7 @@ export class MonitorDatabase {
     return { queued, existing: Boolean(existing), blocked: false };
   }
 
-  listListings(limit = 100) {
+  listListings(limit = 100, { includeUnmatchedDesktop = false } = {}) {
     return this.db
       .prepare(`
         SELECT
@@ -669,7 +669,8 @@ export class MonitorDatabase {
           rules.min_price_cny AS minPriceCny, rules.price_ceiling_cny AS maxPriceCny
         FROM listings
         JOIN rules ON rules.id = listings.rule_id
-          WHERE (listings.below_threshold_alerted = 1 OR rules.kind = 'machine')
+          WHERE (listings.below_threshold_alerted = 1
+            OR (rules.kind = 'machine' AND ? = 1))
           AND NOT EXISTS (
             SELECT 1
             FROM blocked_listings
@@ -678,7 +679,7 @@ export class MonitorDatabase {
         ORDER BY listings.last_seen_at DESC
         LIMIT ?
       `)
-      .all(Math.max(1, Math.min(500, Number(limit) || 100)))
+      .all(includeUnmatchedDesktop ? 1 : 0, Math.max(1, Math.min(500, Number(limit) || 100)))
       .map((row) => ({
         ...row,
         isPersonal: Boolean(row.isPersonal),

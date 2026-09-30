@@ -154,9 +154,6 @@ function renderRules(rules) {
     .filter((rule) => rule.enabled)
     .sort((left, right) => left.id - right.id);
   const scanWaiting = Boolean(state.status?.accessPaused || state.status?.activeRuleId);
-  const scanTitle = state.status?.accessPaused
-    ? "登录或验证暂停期间无法扫描；恢复后会自动继续"
-    : "当前正在扫描其他规则";
   const enabledCount = enabledRules.length;
   $("#rule-count").textContent = `${rules.length} 条规则，${enabledCount} 条启用`;
   $("#rotation-estimate").textContent = enabledCount
@@ -170,7 +167,15 @@ function renderRules(rules) {
 
   body.innerHTML = rules
     .map((rule) => {
-      const waiting = scanWaiting;
+      const cooldownSeconds = Math.max(0, Math.ceil(((rule.nextScanAt ?? 0) - Date.now()) / 1000));
+      const waiting = scanWaiting || cooldownSeconds > 0;
+      const scanTitle = state.status?.accessPaused
+        ? "登录或验证暂停期间无法扫描；恢复后会自动继续"
+        : state.status?.activeRuleId
+          ? "当前正在扫描其他规则"
+          : cooldownSeconds > 0
+            ? `规则冷却中，约 ${Math.ceil(cooldownSeconds / 60)} 分钟后可手动扫描`
+            : "立即扫描这条规则";
       const order = enabledRules.findIndex((candidate) => candidate.id === rule.id);
       const filters = [
         rule.personalOnly ? "个人" : "不限卖家",
@@ -188,7 +193,7 @@ function renderRules(rules) {
             : formatPriceRange(rule.minPriceCny, rule.maxPriceCny) + `<small>${rule.scanIntervalSeconds ?? 600} 秒</small>`}</td>
           <td>${escapeHtml(filters || "-")}</td>
           <td><span class="tag ${rule.enabled ? "on" : "off"}">${rule.enabled ? "已启用" : "已停用"}</span></td>
-          <td>${rule.lastError ? `<small class="error-text">${escapeHtml(rule.lastError)}</small>` : `<small>${rule.lastScannedAt ? formatTime(rule.lastScannedAt) : "未扫描"}</small>`}</td>
+          <td>${rule.lastError ? `<small class="error-text">${escapeHtml(rule.lastError)}</small>` : `<small>${rule.lastScannedAt ? formatTime(rule.lastScannedAt) : "未扫描"}</small>`}${cooldownSeconds > 0 ? `<small>冷却 ${Math.ceil(cooldownSeconds / 60)} 分钟</small>` : ""}</td>
           <td>
             <div class="row-actions">
               <button class="button" data-action="scan" data-id="${rule.id}" ${waiting ? "disabled" : ""} title="${waiting ? scanTitle : "立即扫描这条规则"}">扫描</button>
@@ -207,7 +212,7 @@ function renderListings(listings) {
   state.listings = listings;
   const body = $("#listings-body");
   if (!listings.length) {
-    body.innerHTML = `<tr><td class="empty" colspan="7">暂无符合价格规则的商品。</td></tr>`;
+    body.innerHTML = `<tr><td class="empty" colspan="7">暂无商品记录。</td></tr>`;
     return;
   }
 
@@ -215,11 +220,13 @@ function renderListings(listings) {
     .map(
       (listing) => `
         <tr>
-          <td><strong>${escapeHtml(listing.title)}</strong><small>${escapeHtml(listing.sellerName || "卖家信息未识别")}</small></td>
+          <td><strong>${escapeHtml(listing.title)}</strong><small>${escapeHtml(listing.sellerName || "卖家信息未识别")}</small>${listing.valuationStatus ? `<small>${listing.valuationMatched ? "整机估价通过" : `未提醒：${escapeHtml(listing.valuationReason || listing.eligibilityReasons?.join("；") || "未达到提醒条件")}`}</small>` : ""}${listing.sellerRiskLevel ? `<small>卖家风险：${listing.sellerRiskLevel === "high" ? "较高" : "未知"}${listing.sellerRiskReasons?.length ? `（${escapeHtml(listing.sellerRiskReasons.join("、"))}）` : ""}</small>` : ""}</td>
           <td>${escapeHtml(categoryLabel(listing.category))}<small>${escapeHtml(listing.ruleName)}</small></td>
           <td>${formatCurrency(listing.currentPrice)}${listing.valuationCny !== null && listing.valuationCny !== undefined
             ? `<small>回收估值 ${formatCurrency(listing.valuationCny)}</small>` : ""}</td>
-          <td>${formatPriceRange(listing.minPriceCny, listing.maxPriceCny)}</td>
+          <td>${listing.valuationCny !== null && listing.valuationCny !== undefined
+            ? `<span class="tag ${listing.valuationMatched ? "on" : "off"}">${listing.valuationMatched ? "通过提醒门槛" : "未通过提醒门槛"}</span><small>估值上下限 ±${listing.valuationTolerancePercent ?? 15}%</small>`
+            : formatPriceRange(listing.minPriceCny, listing.maxPriceCny)}</td>
           <td>${formatTime(listing.lastSeenAt)}</td>
           <td><a href="${escapeHtml(listing.url)}" target="_blank" rel="noreferrer">打开商品</a></td>
           <td>
@@ -513,7 +520,7 @@ async function refresh() {
   const [status, rules, listings, blockedListings, notifications, settings, aiRejections] = await Promise.all([
     request("/api/status"),
     request("/api/rules"),
-    request("/api/listings?limit=100"),
+    request("/api/listings?limit=100&includeUnmatchedDesktop=1"),
     request("/api/blocked-listings?limit=100"),
     request("/api/notifications?limit=100"),
     request("/api/settings"),

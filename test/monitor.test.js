@@ -70,6 +70,23 @@ test("monitor baselines existing results then alerts only a new low-price result
   assert.equal(database.listNotifications().length, 1);
 });
 
+test("manual scans respect the persisted per-rule cooldown", async (t) => {
+  const database = new MonitorDatabase(":memory:");
+  t.after(() => database.close());
+  const rule = makeRule(database, { scanIntervalSeconds: 600 });
+  const calls = [];
+  const monitor = new MonitorService({
+    database,
+    browser: { status: () => ({ state: "verified" }), scan: async () => { calls.push(true); return []; } },
+    notifier: makeIdleNotifier()
+  });
+  await monitor.scanRule(database.getRule(rule.id), { force: true });
+  const blocked = await monitor.scanNow(rule.id);
+  assert.equal(calls.length, 1);
+  assert.equal(blocked.scanned, false);
+  assert.match(blocked.reason, /冷却/);
+});
+
 test("automatic scanning walks enabled rules in creation order and keeps rotating", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
   const database = new MonitorDatabase(":memory:");
@@ -272,7 +289,7 @@ test("AI-blocked listings retain their rejection reason and evidence without not
     scan: async () => []
   };
   const monitor = new MonitorService({ database, browser, notifier: makeIdleNotifier() });
-  await monitor.scanNow(rule.id);
+  await monitor.scanRule(database.getRule(rule.id), { force: true });
 
   const listing = {
     itemId: "faulty-gpu", title: "GPU faulty", price: 800,
@@ -288,7 +305,7 @@ test("AI-blocked listings retain their rejection reason and evidence without not
       }]])
     })
   };
-  const result = await monitor.scanNow(rule.id);
+  const result = await monitor.scanRule(database.getRule(rule.id), { force: true });
   assert.equal(result.aiBlocked, 1);
   assert.equal(database.listNotifications().length, 0);
   assert.equal(database.listBlockedListings()[0].blockReason, "Faulty hardware");
@@ -306,7 +323,7 @@ test("restoring an AI-blocked listing keeps alerts flowing and skips further AI 
     scan: async () => []
   };
   const monitor = new MonitorService({ database, browser, notifier: makeIdleNotifier() });
-  await monitor.scanNow(rule.id);
+  await monitor.scanRule(database.getRule(rule.id), { force: true });
 
   const listing = {
     itemId: "restored-gpu", title: "GPU 魔改卡", price: 800,
@@ -327,7 +344,7 @@ test("restoring an AI-blocked listing keeps alerts flowing and skips further AI 
     }
   };
 
-  const blockedScan = await monitor.scanNow(rule.id);
+  const blockedScan = await monitor.scanRule(database.getRule(rule.id), { force: true });
   assert.equal(blockedScan.aiBlocked, 1);
   assert.equal(database.isListingBlocked(listing.itemId), true);
   assert.equal(database.listNotifications().length, 0);
@@ -336,7 +353,7 @@ test("restoring an AI-blocked listing keeps alerts flowing and skips further AI 
   assert.equal(database.unblockListing(listing.itemId), true);
   assert.equal(database.isAiExempt(listing.itemId), true);
 
-  const restoredScan = await monitor.scanNow(rule.id);
+  const restoredScan = await monitor.scanRule(database.getRule(rule.id), { force: true });
   assert.equal(restoredScan.aiBlocked, 0);
   assert.equal(restoredScan.queued, 1);
   assert.equal(database.isListingBlocked(listing.itemId), false);

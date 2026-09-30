@@ -216,7 +216,9 @@ async function routeApi(request, response, url, services) {
     return sendJson(response, 200, await monitor.resumeAfterHumanCheck());
   }
   if (method === "GET" && path === "/api/listings") {
-    return sendJson(response, 200, database.listListings(url.searchParams.get("limit")));
+    return sendJson(response, 200, database.listListings(url.searchParams.get("limit"), {
+      includeUnmatchedDesktop: url.searchParams.get("includeUnmatchedDesktop") === "1"
+    }));
   }
   if (method === "GET" && path === "/api/valuation/settings") {
     return sendJson(response, 200, valuationSettings());

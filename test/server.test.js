@@ -303,6 +303,33 @@ test("rules save without a scan interval and the retired mode endpoint returns 4
   await mode.json();
 });
 
+test("listings API includes rejected desktop candidates only when explicitly requested", async (t) => {
+  const { baseUrl, services } = await startApplication(t);
+  const rule = services.database.createRule({
+    name: "Desktop", category: "custom", keyword: "台式主机", priceCeilingCny: 10000,
+    enabled: true, kind: "machine", valuationMode: "desktop_host"
+  });
+  const listing = {
+    itemId: "rejected-host", title: "台式主机无显卡", price: 2600,
+    url: "https://www.goofish.com/item?id=rejected-host", sellerName: "seller"
+  };
+  services.database.recordCandidateListing(rule, listing, listing.price, false, "", {
+    components: {}, valuationCny: 0, valuationStatus: "missing_required",
+    valuationConfidence: "low", missingParts: ["cpu", "gpu", "memory", "storage"],
+    valuationMatched: false, valuationReason: "缺少可定价的显卡",
+    desktopEligible: true, eligibilityReasons: ["缺少可定价的显卡"],
+    sellerRiskLevel: "unknown", sellerRiskReasons: [], configurationConflicts: []
+  });
+
+  const hidden = await fetch(`${baseUrl}/api/listings`);
+  assert.deepEqual(await hidden.json(), []);
+  const included = await fetch(`${baseUrl}/api/listings?includeUnmatchedDesktop=1`);
+  const [candidate] = await included.json();
+  assert.equal(candidate.itemId, listing.itemId);
+  assert.equal(candidate.valuationMatched, false);
+  assert.equal(candidate.valuationReason, "缺少可定价的显卡");
+});
+
 test("settings accept multiple receiver QQ numbers and reject invalid lists", async (t) => {
   const { services, baseUrl } = await startApplication(t);
   services.database.updateSettings({

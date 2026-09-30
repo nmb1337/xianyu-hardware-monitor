@@ -151,6 +151,39 @@ test("new below-ceiling item is queued once and duplicates are ignored", () => {
   database.close();
 });
 
+test("unmatched desktop candidates are opt-in while component listings stay low-price only", () => {
+  const database = makeDatabase();
+  const componentRule = makeRule(database);
+  const desktopRule = database.createRule({
+    name: "Desktop", category: "custom", keyword: "电脑整机", priceCeilingCny: 10000,
+    enabled: true, kind: "machine", valuationMode: "desktop_host"
+  });
+  const valuation = {
+    components: { cpu: { model: "UNKNOWN", priceCny: null } },
+    valuationCny: 0,
+    valuationStatus: "missing_required",
+    valuationConfidence: "low",
+    missingParts: ["cpu", "gpu", "memory", "storage"],
+    valuationMatched: false,
+    valuationReason: "缺少 CPU",
+    desktopEligible: true,
+    eligibilityReasons: ["缺少 CPU"],
+    sellerRiskLevel: "unknown",
+    sellerRiskReasons: [],
+    configurationConflicts: []
+  };
+  const listing = makeListing("unmatched-host", 5000);
+  database.recordCandidateListing(desktopRule, listing, listing.price, false, "", valuation);
+  database.recordCandidateListing(componentRule, makeListing("expensive-component", 2000), 2000, false, "");
+
+  assert.deepEqual(database.listListings().map((item) => item.itemId), []);
+  const candidates = database.listListings(100, { includeUnmatchedDesktop: true });
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].valuationReason, "缺少 CPU");
+  assert.deepEqual(candidates[0].eligibilityReasons, ["缺少 CPU"]);
+  database.close();
+});
+
 test("high price baseline item remains hidden and does not alert after a later price drop", () => {
   const database = makeDatabase();
   const rule = makeRule(database);

@@ -36,6 +36,14 @@ export function randomBetween(minimum, maximum) {
   return minimum + Math.floor(Math.random() * (maximum - minimum + 1));
 }
 
+export function scanCooldownRemainingSeconds(nextScanAt, timestamp = Date.now()) {
+  const next = Number(nextScanAt);
+  if (!Number.isFinite(next) || next <= timestamp) {
+    return 0;
+  }
+  return Math.ceil((next - timestamp) / 1000);
+}
+
 export function isAccessPauseError(error, browserState = "") {
   const source = `${error instanceof Error ? error.message : error}\n${browserState}`.toLowerCase();
   return /验证码|安全验证|滑块|操作过于频繁|访问异常|请先登录|扫码登录|登录失效|waiting_for_verification|captcha|x5sec|too many requests|rate limit/.test(

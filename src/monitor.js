@@ -7,6 +7,7 @@ import {
   RULE_GAP_MAX_MILLISECONDS,
   RULE_GAP_MIN_MILLISECONDS,
   isAccessPauseError,
+  scanCooldownRemainingSeconds,
   randomBetween
 } from "./scan-policy.js";
 
@@ -213,18 +214,18 @@ export class MonitorService {
     }
   }
 
-  async scanRule(rule, { force = false } = {}) {
+  async scanRule(rule, { force = false, manual = false } = {}) {
     const generation = this.scanGeneration;
     return this.#withScanOperation(() => {
       const current = this.database.getRule(rule.id);
       if (generation !== this.scanGeneration || !current) {
         return { scanned: false, reason: "扫描已取消", matched: 0, queued: 0 };
       }
-      return this.#scanRule(current, { force });
+      return this.#scanRule(current, { force, manual });
     });
   }
 
-  async #scanRule(rule, { force }) {
+  async #scanRule(rule, { force, manual }) {
     if (!force && !rule.enabled) {
       return { scanned: false, reason: "规则未启用", matched: 0, queued: 0 };
     }
@@ -232,6 +233,16 @@ export class MonitorService {
       const reason = this.#accessPauseMessage();
       this.lastActivity = reason;
       return { scanned: false, reason, matched: 0, queued: 0 };
+    }
+    if (force && manual) {
+      const remainingSeconds = rule.lastScannedAt
+        ? scanCooldownRemainingSeconds(rule.nextScanAt)
+        : 0;
+      if (remainingSeconds > 0) {
+        const reason = `该规则仍在冷却中，请约 ${Math.ceil(remainingSeconds / 60)} 分钟后再扫描。`;
+        this.lastActivity = reason;
+        return { scanned: false, reason, matched: 0, queued: 0, remainingSeconds };
+      }
     }
 
     // Count every scan attempt, even failed ones, so the daily cap cannot be bypassed by errors.
@@ -350,7 +361,10 @@ export class MonitorService {
     } finally {
       this.database.markRuleScanned(rule.id, {
         error: errorMessage,
-        nextScanAt: Date.now() + randomBetween(RULE_GAP_MIN_MILLISECONDS, RULE_GAP_MAX_MILLISECONDS)
+        nextScanAt: Date.now() + Math.max(
+          rule.scanIntervalSeconds * 1000,
+          randomBetween(RULE_GAP_MIN_MILLISECONDS, RULE_GAP_MAX_MILLISECONDS)
+        )
       });
       this.activeRuleId = null;
     }
@@ -411,7 +425,7 @@ export class MonitorService {
     if (!rule) {
       throw new Error("未找到该规则");
     }
-    const result = await this.scanRule(rule, { force: true });
+    const result = await this.scanRule(rule, { force: true, manual: true });
     await this.notifier.processOne();
     return result;
   }
