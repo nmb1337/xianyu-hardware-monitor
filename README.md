@@ -111,9 +111,11 @@ XIANYU_BROWSER_PATH=C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe
 2. 在 AstrBot WebUI 的“机器人”中创建并启用 `OneBot v11` 机器人。记下其 ID，例如 `napcat-qq`。
 3. 在 AstrBot OneBot 设置中使用反向 WebSocket 端口 `6199`；在 NapCat 的网络配置创建“WebSocket 客户端”，地址填写 `ws://127.0.0.1:6199/ws`。AstrBot 日志显示 OneBot 适配器已连接后再继续。
 4. 在 AstrBot WebUI 的“设置”创建开发者 API Key，仅勾选 `im` 权限。
-5. 在本工具的“QQ 提醒”中填写 AstrBot 地址（默认 `http://127.0.0.1:6185`）、IM API Key、OneBot 机器人 ID 与接收 QQ 号（可填多个，逗号分隔，最多 10 个），然后点击“发送测试”。
+5. 在本工具的“QQ 提醒”中填写 AstrBot 地址（默认 `http://127.0.0.1:6185`）、IM API Key、OneBot 机器人 ID 与接收 QQ 号（可填多个，逗号分隔，最多 10 个），然后点击“发送测试”。测试成功表示本工具已经得到 AstrBot 的成功响应；还应在接收 QQ 和 NapCat 日志中确认消息实际到达。
 
-提醒由 NapCat 已登录的 QQ 发出，接收 QQ 是你的收件账号；两者不是同一个概念。通常需要让机器人 QQ 与接收 QQ 互为好友。QQ 消息和本地控制台都会包含商品原链接。填写多个接收 QQ 时，机器人逐个私聊发送；个别接收人发送失败只重试未成功的人，已收到的不会重复。
+提醒由 NapCat 已登录的 QQ 发出，接收 QQ 是你的收件账号；两者不是同一个概念。通常需要让机器人 QQ 与接收 QQ 互为好友。QQ 消息和本地控制台都会包含商品原链接。填写多个接收 QQ 时，机器人逐个私聊发送；个别接收人发送失败只重试未成功的人，已收到的不会重复。测试消息使用和实际提醒相同的 AstrBot IM 接口，但不会启动闲鱼扫描。
+
+如果页面测试成功但 QQ 没收到，依次检查：NapCat QQ 是否在线、AstrBot 日志中的 OneBot WebSocket 是否已连接、机器人 ID 是否与 AstrBot 配置完全一致、机器人 QQ 是否能给接收 QQ 发起私聊，以及接收 QQ 是否屏蔽陌生人消息。
 
 ## 可选 AI 二次审核
 
