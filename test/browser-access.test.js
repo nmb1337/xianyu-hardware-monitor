@@ -124,14 +124,17 @@ const searchPayload = {
   } } } } }] }
 };
 
-async function scanFixture(t, { payload = searchPayload, status = 200, searchBox = false } = {}) {
+async function scanFixture(t, { payload = searchPayload, status = 200, searchBox = false, searchOnEnter = false } = {}) {
+  const enterSubmit = searchOnEnter
+    ? ` onkeydown="if(event.key==='Enter'){event.preventDefault();fetch('/h5/mtop.taobao.idlemtopsearch.pc.search/1.0/');}"`
+    : "";
   const result = await fixture(t, {
     html: `<body>
-      ${searchBox ? '<input id="search-input" placeholder="\u641c\u7d22\u4f60\u60f3\u8981\u7684\u5b9d\u8d1d">' : ""}
+      ${searchBox ? `<input id="search-input" placeholder="\u641c\u7d22\u4f60\u60f3\u8981\u7684\u5b9d\u8d1d"${enterSubmit}>` : ""}
       <span hidden>\u65b0\u53d1\u5e03</span>
-      <button onclick="document.querySelector('#latest').hidden=false">\u65b0\u53d1\u5e03</button>
+      <button onclick="window.__sortClicks=(window.__sortClicks||0)+1;document.querySelector('#latest').hidden=false">\u65b0\u53d1\u5e03</button>
       <span hidden>\u6700\u65b0</span>
-      <button id="latest" hidden onclick="fetch('/h5/mtop.taobao.idlemtopsearch.pc.search/1.0/')">\u6700\u65b0</button>
+      <button id="latest" hidden onclick="window.__sortClicks=(window.__sortClicks||0)+1;fetch('/h5/mtop.taobao.idlemtopsearch.pc.search/1.0/')">\u6700\u65b0</button>
     </body>`
   });
   await result.context.route("**/h5/mtop.taobao.idlemtopsearch.pc.search/**", (route) =>
@@ -191,6 +194,28 @@ browserTest("continues with the current search response if the latest sort contr
   assert.equal(listings.length, 1);
   assert.equal(listings[0].itemId, "fixture-gpu");
   assert.match(browser.status().message, /排序控件不可用，已读取 1 个搜索结果/);
+  await page.close();
+});
+
+browserTest("desktop machine rules search by keyword without clicking the latest-sort controls", async (t) => {
+  const { browser, context, page } = await scanFixture(t, { searchBox: true, searchOnEnter: true });
+  const openDetailPage = context.newPage.bind(context);
+  context.newPage = async () => {
+    const detailPage = await openDetailPage();
+    detailPage.waitForTimeout = async () => {};
+    return detailPage;
+  };
+  const listings = await browser.scan({
+    keyword: "gpu",
+    kind: "machine",
+    valuationMode: "desktop_host"
+  });
+  assert.equal(listings.length, 1);
+  assert.equal(listings[0].itemId, "fixture-gpu");
+  assert.equal(await page.locator("#search-input").inputValue(), "gpu");
+  assert.equal(await page.evaluate(() => window.__sortClicks || 0), 0);
+  assert.ok(listings[0].description.length > 0);
+  assert.match(browser.status().message, /已按关键词直接搜索 1 个结果，读取 1 个商品文案/);
   await page.close();
 });
 

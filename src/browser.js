@@ -542,8 +542,12 @@ export class XianyuBrowser {
     }
   }
 
+  #isDesktopMachineRule(rule) {
+    return Boolean(rule) && (rule.kind === "machine" || isDesktopValuationMode(rule.valuationMode));
+  }
+
   async #readDesktopDetails(rule, listings) {
-    if (!isDesktopValuationMode(rule.valuationMode) && rule.kind !== "machine") {
+    if (!this.#isDesktopMachineRule(rule)) {
       return listings;
     }
     const selected = listings.slice(0, DESKTOP_DETAIL_LIMIT);
@@ -582,7 +586,9 @@ export class XianyuBrowser {
     return listings;
   }
 
-  async #readLatestResponse() {
+  // Watches the page for the next mtop search payload. Attach it before triggering a
+  // search (typing, navigation or a sort click) and await the promise afterwards.
+  #observeSearchResponse({ timeoutMs = 30_000 } = {}) {
     const page = this.page;
     let onResponse;
     let onClose;
@@ -596,8 +602,23 @@ export class XianyuBrowser {
       onClose = () => reject(new Error("Target page, context or browser has been closed"));
       page.on("response", onResponse);
       page.on("close", onClose);
-      timer = setTimeout(() => reject(new Error("等待闲鱼搜索结果超时。")), 30_000);
+      timer = setTimeout(() => reject(new Error("等待闲鱼搜索结果超时。")), timeoutMs);
     });
+    // The caller may await the promise only after the search actions, so an early
+    // failure must not surface as an unhandled rejection.
+    response.catch(() => {});
+    return {
+      response,
+      cleanup: () => {
+        clearTimeout(timer);
+        page.removeListener("response", onResponse);
+        page.removeListener("close", onClose);
+      }
+    };
+  }
+
+  async #readLatestResponse() {
+    const { response, cleanup } = this.#observeSearchResponse();
     try {
       try {
         await this.#clickSortOption("最新");
@@ -616,9 +637,7 @@ export class XianyuBrowser {
       }
       return await response;
     } finally {
-      clearTimeout(timer);
-      page.removeListener("response", onResponse);
-      page.removeListener("close", onClose);
+      cleanup();
     }
   }
 
@@ -776,23 +795,38 @@ export class XianyuBrowser {
       }
 
       await this.#checkForManualVerification();
-      await this.#openSearch(rule.keyword);
 
-      await this.#checkForManualVerification();
-      await this.#browseResults();
-      await this.#checkForManualVerification();
-
-      await this.#clickSortOption("新发布");
-      await this.#humanPause(400, 1_200);
-      await this.#checkForManualVerification();
-
-      await this.#humanPause(250, 800);
+      // Desktop machine rules keep the default keyword ordering: the "latest published"
+      // feed is dominated by items unrelated to a complete machine, while the normal
+      // search stays on topic and the item copy read below feeds the valuation. Watch
+      // for the keyword search's own payload before typing so no sort click is needed.
+      const directSearch = this.#isDesktopMachineRule(rule);
+      const searchResponse = directSearch
+        ? this.#observeSearchResponse({ timeoutMs: 60_000 })
+        : null;
       let response;
       try {
-        response = await this.#readLatestResponse();
+        await this.#openSearch(rule.keyword);
+
+        await this.#checkForManualVerification();
+        await this.#browseResults();
+        await this.#checkForManualVerification();
+
+        if (searchResponse) {
+          response = await searchResponse.response;
+        } else {
+          await this.#clickSortOption("新发布");
+          await this.#humanPause(400, 1_200);
+          await this.#checkForManualVerification();
+
+          await this.#humanPause(250, 800);
+          response = await this.#readLatestResponse();
+        }
       } catch (error) {
         await this.#checkForManualVerification();
         throw error;
+      } finally {
+        searchResponse?.cleanup();
       }
       await this.#checkForManualVerification();
       if ([401, 403, 429].includes(response.status())) {
@@ -815,8 +849,13 @@ export class XianyuBrowser {
       this.loginState = "verified";
       const enriched = await this.#readDesktopDetails(rule, listings);
       const sortFallback = this.message.startsWith("未能切换到最新排序");
+      const detailCount = directSearch
+        ? enriched.filter((listing) => listing.description && !listing.detailError).length
+        : 0;
       this.message = listings.length
-        ? `${sortFallback ? "排序控件不可用，" : ""}已读取 ${listings.length} 个搜索结果。`
+        ? directSearch
+          ? `已按关键词直接搜索 ${listings.length} 个结果，读取 ${detailCount} 个商品文案用于整机估价。`
+          : `${sortFallback ? "排序控件不可用，" : ""}已读取 ${listings.length} 个搜索结果。`
         : "未读取到商品卡片，可能需要刷新页面或人工完成验证。";
       return enriched.slice(0, 30);
     }, { retryClosed: false });
